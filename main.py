@@ -363,8 +363,8 @@ class PDFViewer(QMainWindow):
         self.file_path = ""
         
         self._setup_ui()
-        self._setup_toolbar()
         self._setup_sidebar()
+        self._setup_toolbar()
         self._apply_theme()
     
     def _setup_ui(self):
