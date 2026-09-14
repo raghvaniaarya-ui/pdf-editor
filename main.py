@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox, QFormLayout, QLineEdit,
     QTextEdit, QPushButton, QCheckBox
 )
-from PyQt6.QtCore import Qt, QRectF, QSize, QPoint, pyqtSignal
+from PyQt6.QtCore import Qt, QRectF, QSize, QPoint, pyqtSignal, QTimer
 from PyQt6.QtGui import (
     QAction, QIcon, QPixmap, QImage, QKeySequence,
     QPainter, QPen, QColor, QBrush, QCursor,
@@ -26,6 +26,7 @@ class PDFPageWidget(QWidget):
     
     annotation_added = pyqtSignal(object, object)  # page_num, annot_data
     text_selected = pyqtSignal(object, object)  # page_num, text
+    render_requested = pyqtSignal(int)  # page_num
     
     def __init__(self, page: fitz.Page, page_num: int, zoom: float = 1.0):
         super().__init__()
@@ -44,19 +45,37 @@ class PDFPageWidget(QWidget):
         # Highlights storage
         self.highlights = []
         
-        self._render_pixmap()
+        # Lazy rendering
+        self._pixmap = None
+        self._rendered_zoom = None
+        self._render_timer = None
     
     def _render_pixmap(self):
+        """Render page to pixmap at current zoom."""
+        if not self.page:
+            return
         mat = fitz.Matrix(self.zoom, self.zoom)
         pix = self.page.get_pixmap(matrix=mat, alpha=False)
         img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888)
-        self.pixmap = QPixmap.fromImage(img)
-        self.setFixedSize(self.pixmap.size())
+        self._pixmap = QPixmap.fromImage(img)
+        self._rendered_zoom = self.zoom
+        self.setFixedSize(self._pixmap.size())
+    
+    def ensure_rendered(self):
+        """Render if not already rendered at current zoom."""
+        if self._pixmap is None or abs(self._rendered_zoom - self.zoom) > 0.01:
+            self._render_pixmap()
+            self.update()
     
     def set_zoom(self, zoom: float):
         self.zoom = zoom
-        self._render_pixmap()
-        self.update()
+        # Defer rendering to avoid blocking UI
+        if self._render_timer:
+            self._render_timer.stop()
+        self._render_timer = QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.timeout.connect(self._render_pixmap)
+        self._render_timer.start(0)
     
     def set_annot_mode(self, enabled: bool):
         self.annot_mode = enabled
@@ -91,7 +110,6 @@ class PDFPageWidget(QWidget):
     
     def mousePressEvent(self, event):
         if self.annot_mode and event.button() == Qt.MouseButton.LeftButton:
-            # Convert widget coords to PDF coords
             pos = event.position()
             pdf_x = pos.x() / self.zoom
             pdf_y = pos.y() / self.zoom
@@ -114,7 +132,6 @@ class PDFPageWidget(QWidget):
     
     def mouseReleaseEvent(self, event):
         if self.select_mode and self.selection_start and self.selection_end:
-            # Convert selection to PDF coords and extract text
             x1 = min(self.selection_start.x(), self.selection_end.x()) / self.zoom
             y1 = min(self.selection_start.y(), self.selection_end.y()) / self.zoom
             x2 = max(self.selection_start.x(), self.selection_end.x()) / self.zoom
@@ -126,16 +143,15 @@ class PDFPageWidget(QWidget):
             if text.strip():
                 self.text_selected.emit(self.page_num, text.strip())
                 
-                # Show context menu for highlight
                 menu = QMenu(self)
                 highlight_action = menu.addAction("Highlight")
                 underline_action = menu.addAction("Underline")
                 action = menu.exec(self.mapToGlobal(event.pos().toPoint()))
                 
                 if action == highlight_action:
-                    self.add_highlight(rect, (1, 1, 0), 0.3)  # Yellow
+                    self.add_highlight(rect, (1, 1, 0), 0.3)
                 elif action == underline_action:
-                    self.add_highlight(rect, (1, 0, 0), 0.5)  # Red underline
+                    self.add_highlight(rect, (1, 0, 0), 0.5)
             
             self.selection_start = None
             self.selection_end = None
@@ -143,9 +159,13 @@ class PDFPageWidget(QWidget):
     
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.drawPixmap(0, 0, self.pixmap)
+        if self._pixmap:
+            painter.drawPixmap(0, 0, self._pixmap)
+        else:
+            # Show placeholder while rendering
+            painter.fillRect(self.rect(), QColor(240, 240, 240))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, f"Page {self.page_num + 1}\n(Rendering...)")
         
-        # Draw selection rectangle
         if self.select_mode and self.selection_start and self.selection_end:
             painter.setPen(QPen(QColor(0, 120, 215), 2, Qt.PenStyle.DashLine))
             painter.setBrush(QBrush(QColor(0, 120, 215, 50)))
@@ -570,7 +590,7 @@ class PDFViewer(QMainWindow):
         if not self.doc:
             return
         
-        # Render all pages
+        # Create placeholder widgets for all pages (fast)
         for i in range(len(self.doc)):
             page = self.doc[i]
             page_widget = PDFPageWidget(page, i, self.zoom)
@@ -580,6 +600,31 @@ class PDFViewer(QMainWindow):
         
         self.page_spin.setMaximum(len(self.doc))
         self.page_spin.setValue(self.current_page + 1)
+        
+        # Connect scroll handler for lazy rendering
+        self.scroll_area.verticalScrollBar().valueChanged.connect(self._on_scroll)
+        
+        # Initial render of visible pages
+        QTimer.singleShot(0, self._render_visible_pages)
+    
+    def _render_visible_pages(self):
+        """Render only pages currently visible in viewport."""
+        if not self.doc:
+            return
+        
+        viewport_rect = self.scroll_area.viewport().rect()
+        viewport_top = self.scroll_area.verticalScrollBar().value()
+        viewport_bottom = viewport_top + viewport_rect.height()
+        
+        for i in range(self.pages_layout.count()):
+            widget = self.pages_layout.itemAt(i).widget()
+            if isinstance(widget, PDFPageWidget):
+                widget_rect = self.pages_container.mapTo(self.scroll_area.viewport(), widget.pos())
+                widget_bottom = widget_rect.y() + widget.height()
+                
+                # Check if widget intersects viewport (with small buffer)
+                if widget_bottom >= viewport_top - 100 and widget_rect.y() <= viewport_bottom + 100:
+                    widget.ensure_rendered()
     
     def update_ui(self):
         if self.doc:
@@ -613,6 +658,10 @@ class PDFViewer(QMainWindow):
             widget = self.pages_layout.itemAt(self.current_page).widget()
             if widget:
                 self.scroll_area.ensureWidgetVisible(widget)
+    
+    def _on_scroll(self, value):
+        """Handle scroll events - render newly visible pages."""
+        self._render_visible_pages()
     
     def zoom_in(self):
         self.set_zoom(min(self.zoom * 1.2, 5.0))
@@ -821,14 +870,18 @@ class PDFViewer(QMainWindow):
 
 
 def main():
-    app = QApplication(sys.argv)
-    app.setApplicationName("PDF Editor")
-    
-    viewer = PDFViewer()
-    viewer.show()
-    
-    sys.exit(app.exec())
-
+    import traceback
+    try:
+        app = QApplication(sys.argv)
+        app.setApplicationName("PDF Editor")
+        
+        viewer = PDFViewer()
+        viewer.show()
+        
+        sys.exit(app.exec())
+    except Exception as e:
+        traceback.print_exc()
+        input("Press Enter to exit...")
 
 if __name__ == "__main__":
     main()
