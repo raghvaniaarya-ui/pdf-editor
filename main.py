@@ -11,11 +11,11 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox, QFormLayout, QLineEdit,
     QTextEdit, QPushButton, QCheckBox
 )
-from PyQt6.QtCore import Qt, QRectF, QSize, QPoint, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, QRectF, QSize, QPoint, pyqtSignal, QTimer, QMimeData
 from PyQt6.QtGui import (
     QAction, QIcon, QPixmap, QImage, QKeySequence,
     QPainter, QPen, QColor, QBrush, QCursor,
-    QFont, QShortcut
+    QFont, QShortcut, QDrag
 )
 
 import pymupdf as fitz
@@ -174,25 +174,60 @@ class PDFPageWidget(QWidget):
 
 
 class ThumbnailWidget(QWidget):
-    """Thumbnail widget for page navigation."""
+    """Thumbnail widget for page navigation with drag & drop reordering."""
     
     page_clicked = pyqtSignal(int)
+    drag_started = pyqtSignal(int)  # page_num
+    drop_requested = pyqtSignal(int, int)  # source_page, target_page
     
     def __init__(self, page: fitz.Page, page_num: int):
         super().__init__()
         self.page_num = page_num
         self.setFixedSize(120, 160)
         self.setToolTip(f"Page {page_num + 1}")
+        self.setAcceptDrops(True)
         
         # Render thumbnail
         mat = fitz.Matrix(0.3, 0.3)
         pix = page.get_pixmap(matrix=mat, alpha=False)
         img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888)
         self.pixmap = QPixmap.fromImage(img)
+        
+        self._drag_start_pos = None
     
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start_pos = event.pos()
             self.page_clicked.emit(self.page_num)
+    
+    def mouseMoveEvent(self, event):
+        if self._drag_start_pos and event.buttons() & Qt.MouseButton.LeftButton:
+            distance = (event.pos() - self._drag_start_pos).manhattanLength()
+            if distance > QApplication.startDragDistance():
+                drag = QDrag(self)
+                mime_data = QMimeData()
+                mime_data.setData("application/x-pdf-page", str(self.page_num).encode())
+                drag.setMimeData(mime_data)
+                drag.setPixmap(self.pixmap.scaled(60, 80, Qt.AspectRatioMode.KeepAspectRatio))
+                drag.setHotSpot(QPoint(30, 40))
+                drag.exec(Qt.DropAction.MoveAction)
+                self._drag_start_pos = None
+    
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasFormat("application/x-pdf-page"):
+            event.acceptProposedAction()
+            self.setStyleSheet("border: 2px solid #0078d7;")
+    
+    def dragLeaveEvent(self, event):
+        self.setStyleSheet("")
+    
+    def dropEvent(self, event):
+        self.setStyleSheet("")
+        if event.mimeData().hasFormat("application/x-pdf-page"):
+            source_page = int(event.mimeData().data("application/x-pdf-page").data().decode())
+            if source_page != self.page_num:
+                self.drop_requested.emit(source_page, self.page_num)
+            event.acceptProposedAction()
     
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -206,6 +241,7 @@ class ThumbnailSidebar(QDockWidget):
     """Sidebar with page thumbnails."""
     
     page_selected = pyqtSignal(int)
+    pages_reordered = pyqtSignal(list)  # new page order list
     
     def __init__(self, parent=None):
         super().__init__("Thumbnails", parent)
@@ -219,20 +255,48 @@ class ThumbnailSidebar(QDockWidget):
         self.list_widget.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.list_widget.setSpacing(10)
         self.setWidget(self.list_widget)
+        
+        self._page_widgets = []  # Store widget references
     
     def update_thumbnails(self, doc: fitz.Document):
         self.list_widget.clear()
+        self._page_widgets = []
         for i in range(len(doc)):
             page = doc[i]
             item = QListWidgetItem()
             widget = ThumbnailWidget(page, i)
             widget.page_clicked.connect(self.page_selected.emit)
+            widget.drop_requested.connect(self._on_drop_requested)
             item.setSizeHint(widget.sizeHint())
             self.list_widget.addItem(item)
             self.list_widget.setItemWidget(item, widget)
+            self._page_widgets.append(widget)
+    
+    def _on_drop_requested(self, source_page: int, target_page: int):
+        """Handle drag & drop reordering."""
+        # Move widget in list
+        widget = self._page_widgets.pop(source_page)
+        self._page_widgets.insert(target_page, widget)
+        
+        # Rebuild list widget
+        self.list_widget.clear()
+        for i, w in enumerate(self._page_widgets):
+            item = QListWidgetItem()
+            w.page_num = i  # Update page number
+            w.setToolTip(f"Page {i + 1}")
+            item.setSizeHint(w.sizeHint())
+            self.list_widget.addItem(item)
+            self.list_widget.setItemWidget(item, w)
+        
+        # Emit new order
+        self.pages_reordered.emit([w.page_num for w in self._page_widgets])
     
     def set_current_page(self, page_num: int):
         self.list_widget.setCurrentRow(page_num)
+    
+    def get_page_order(self):
+        """Return current page order."""
+        return [w.page_num for w in self._page_widgets]
 
 
 class MergeSplitDialog(QDialog):
@@ -417,6 +481,7 @@ class PDFViewer(QMainWindow):
     def _setup_sidebar(self):
         self.thumbnail_sidebar = ThumbnailSidebar(self)
         self.thumbnail_sidebar.page_selected.connect(self.go_to_page)
+        self.thumbnail_sidebar.pages_reordered.connect(self.reorder_pages)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.thumbnail_sidebar)
     
     def _setup_toolbar(self):
@@ -658,6 +723,33 @@ class PDFViewer(QMainWindow):
             widget = self.pages_layout.itemAt(self.current_page).widget()
             if widget:
                 self.scroll_area.ensureWidgetVisible(widget)
+    
+    def reorder_pages(self, new_order: list):
+        """Reorder PDF pages based on thumbnail drag & drop."""
+        if not self.doc or len(new_order) != len(self.doc):
+            return
+        
+        try:
+            # Create new document with reordered pages
+            new_doc = fitz.open()
+            for old_index in new_order:
+                new_doc.insert_pdf(self.doc, from_page=old_index, to_page=old_index)
+            
+            # Save to temp file and reload
+            import tempfile
+            tmp_path = tempfile.mktemp(suffix=".pdf")
+            new_doc.save(tmp_path)
+            new_doc.close()
+            
+            # Reload document
+            current_page = self.current_page
+            self.load_document(tmp_path)
+            self.current_page = min(current_page, len(self.doc) - 1)
+            self.scroll_to_page()
+            
+            self.status_label.setText(f"Pages reordered")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to reorder pages:\n{e}")
     
     def _on_scroll(self, value):
         """Handle scroll events - render newly visible pages."""
