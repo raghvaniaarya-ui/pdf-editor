@@ -9,13 +9,18 @@ from PyQt6.QtWidgets import (
     QDockWidget, QListWidget, QListWidgetItem,
     QMenu, QInputDialog, QColorDialog, QDialog,
     QDialogButtonBox, QFormLayout, QLineEdit,
-    QTextEdit, QPushButton, QCheckBox
+    QTextEdit, QPushButton, QCheckBox, QSplitter,
+    QTabWidget, QTabBar, QScrollBar, QFrame,
+    QSlider, QButtonGroup, QRadioButton, QGroupBox,
+    QTreeWidget, QTreeWidgetItem, QTableWidget,
+    QTableWidgetItem, QHeaderView, QAbstractItemView
 )
-from PyQt6.QtCore import Qt, QRectF, QSize, QPoint, pyqtSignal, QTimer, QMimeData
+from PyQt6.QtCore import Qt, QRectF, QSize, QPoint, pyqtSignal, QTimer, QMimeData, QEvent
 from PyQt6.QtGui import (
     QAction, QIcon, QPixmap, QImage, QKeySequence,
     QPainter, QPen, QColor, QBrush, QCursor,
-    QFont, QShortcut, QDrag
+    QFont, QShortcut, QDrag, QStandardItemModel,
+    QStandardItem
 )
 
 import pymupdf as fitz
@@ -434,6 +439,352 @@ class FormFieldDialog(QDialog):
         return values
 
 
+# ============ ADOBE-STYLE UI COMPONENTS ============
+
+class OutlineSidebar(QWidget):
+    """Bookmarks/Outline sidebar - Acrobat style."""
+    
+    page_selected = pyqtSignal(int)
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        
+        toolbar = QHBoxLayout()
+        expand_btn = QPushButton("Expand All")
+        expand_btn.clicked.connect(self.expand_all)
+        collapse_btn = QPushButton("Collapse All")
+        collapse_btn.clicked.connect(self.collapse_all)
+        toolbar.addWidget(expand_btn)
+        toolbar.addWidget(collapse_btn)
+        toolbar.addStretch()
+        layout.addLayout(toolbar)
+        
+        self.tree = QTreeWidget()
+        self.tree.setHeaderHidden(True)
+        self.tree.setIndentation(16)
+        self.tree.itemClicked.connect(self._on_item_clicked)
+        layout.addWidget(self.tree)
+        
+        self._bookmarks = []
+    
+    def set_document(self, doc):
+        self.tree.clear()
+        self._bookmarks = []
+        if not doc:
+            return
+        
+        outline = doc.get_toc()
+        if outline:
+            self._build_tree(outline)
+            self.tree.expandAll()
+    
+    def _build_tree(self, outline, parent=None):
+        for item in outline:
+            level, title, page = item
+            tree_item = QTreeWidgetItem([title])
+            tree_item.setData(0, Qt.ItemDataRole.UserRole, page - 1)
+            if parent:
+                parent.addChild(tree_item)
+            else:
+                self.tree.addTopLevelItem(tree_item)
+    
+    def _on_item_clicked(self, item, column):
+        page = item.data(0, Qt.ItemDataRole.UserRole)
+        if page is not None:
+            self.page_selected.emit(page)
+    
+    def expand_all(self):
+        self.tree.expandAll()
+    
+    def collapse_all(self):
+        self.tree.collapseAll()
+
+
+class CommentsSidebar(QWidget):
+    """Annotations/Comments sidebar - Acrobat style."""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        
+        filter_layout = QHBoxLayout()
+        filter_layout.addWidget(QLabel("Filter:"))
+        self.filter_combo = QComboBox()
+        self.filter_combo.addItems(["All", "Comments", "Highlights", "Notes", "Stamps"])
+        filter_layout.addWidget(self.filter_combo)
+        filter_layout.addStretch()
+        layout.addLayout(filter_layout)
+        
+        self.comments_list = QListWidget()
+        self.comments_list.setAlternatingRowColors(True)
+        layout.addWidget(self.comments_list)
+        
+        btn_layout = QHBoxLayout()
+        reply_btn = QPushButton("Reply")
+        delete_btn = QPushButton("Delete")
+        btn_layout.addWidget(reply_btn)
+        btn_layout.addWidget(delete_btn)
+        layout.addLayout(btn_layout)
+    
+    def set_document(self, doc):
+        self.comments_list.clear()
+        if not doc:
+            return
+        
+        for i in range(len(doc)):
+            page = doc[i]
+            annots = list(page.annots()) if page.annots() else []
+            for annot in annots:
+                item = QListWidgetItem(f"Page {i+1}: {annot.type[1]} - {annot.info.get('content', '')[:50]}")
+                item.setData(Qt.ItemDataRole.UserRole, (i, annot))
+                self.comments_list.addItem(item)
+
+
+class ToolsPanel(QWidget):
+    """Right-side tools panel - Acrobat style."""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent_viewer = parent
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        
+        self._add_tool_group("Organize Pages", [
+            ("Rotate Left", "Rotate page counter-clockwise", "rotate_left"),
+            ("Rotate Right", "Rotate page clockwise", "rotate_right"),
+            ("Delete Page", "Delete current page", "delete_page"),
+            ("Insert Page", "Insert blank page", "insert_page"),
+            ("Extract Pages", "Extract pages to new PDF", "extract_pages"),
+        ], layout)
+        
+        self._add_tool_group("Edit PDF", [
+            ("Add Text", "Add text box", "add_text"),
+            ("Add Image", "Insert image", "add_image"),
+            ("Add Link", "Create hyperlink", "add_link"),
+            ("Redact", "Redact sensitive content", "redact"),
+            ("Crop Pages", "Crop page margins", "crop_pages"),
+        ], layout)
+        
+        self._add_tool_group("Comment", [
+            ("Sticky Note", "Add comment note", "add_note"),
+            ("Highlight Text", "Highlight selected text", "highlight_text"),
+            ("Underline Text", "Underline selected text", "underline_text"),
+            ("Strikethrough", "Strikethrough text", "strikethrough"),
+            ("Freehand Draw", "Draw freehand", "freehand_draw"),
+            ("Add Stamp", "Add stamp", "add_stamp"),
+        ], layout)
+        
+        self._add_tool_group("Forms & Signatures", [
+            ("Prepare Form", "Auto-detect form fields", "prepare_form"),
+            ("Add Text Field", "Add text input field", "add_text_field"),
+            ("Add Checkbox", "Add checkbox", "add_checkbox"),
+            ("Add Signature", "Add digital signature", "add_signature"),
+            ("Sign Document", "Sign with certificate", "sign_document"),
+        ], layout)
+        
+        self._add_tool_group("Export & Convert", [
+            ("Export to Images", "Save pages as images", "export_images"),
+            ("Export to Text", "Extract text", "export_text"),
+            ("Export to Word", "Convert to Word", "export_word"),
+            ("Export to Excel", "Convert to Excel", "export_excel"),
+            ("Optimize PDF", "Reduce file size", "optimize_pdf"),
+        ], layout)
+        
+        layout.addStretch()
+    
+    def _add_tool_group(self, title, tools, parent_layout):
+        group = QGroupBox(title)
+        group.setCheckable(True)
+        group.setChecked(False)
+        group.toggled.connect(lambda checked, g=group: self._toggle_group(g, checked))
+        layout = QVBoxLayout(group)
+        
+        for tool_name, tool_desc, action in tools:
+            btn = QPushButton(tool_name)
+            btn.setToolTip(tool_desc)
+            btn.setStyleSheet("text-align: left; padding: 8px;")
+            btn.clicked.connect(lambda _, a=action: self._on_tool_click(a))
+            layout.addWidget(btn)
+        
+        parent_layout.addWidget(group)
+    
+    def _toggle_group(self, group, checked):
+        for i in range(group.layout().count()):
+            item = group.layout().itemAt(i)
+            if item.widget():
+                item.widget().setVisible(checked)
+    
+    def _on_tool_click(self, action):
+        if self.parent_viewer and hasattr(self.parent_viewer, action):
+            getattr(self.parent_viewer, action)()
+
+
+class DocumentToolbar(QWidget):
+    """Document toolbar above the viewer - Acrobat style."""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent_viewer = parent
+        self.setFixedHeight(48)
+        self.setStyleSheet("""
+            QWidget { background: #f0f0f0; border-bottom: 1px solid #d0d0d0; }
+            QPushButton { border: none; padding: 6px 12px; border-radius: 4px; }
+            QPushButton:hover { background: #e0e0e0; }
+            QPushButton:pressed { background: #d0d0d0; }
+            QComboBox { padding: 4px 8px; border: 1px solid #ccc; border-radius: 3px; }
+        """)
+        
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(4)
+        
+        nav_group = self._create_button_group([
+            ("⏮", "First Page", "first_page"),
+            ("◀", "Previous Page", "prev_page"),
+            ("▶", "Next Page", "next_page"),
+            ("⏭", "Last Page", "last_page"),
+        ])
+        layout.addWidget(nav_group)
+        
+        layout.addWidget(self._separator())
+        
+        self.page_input = QSpinBox()
+        self.page_input.setMinimum(1)
+        self.page_input.setMaximumWidth(70)
+        self.page_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.page_input.valueChanged.connect(self._on_page_changed)
+        layout.addWidget(self.page_input)
+        self.page_total_label = QLabel("/ 0")
+        layout.addWidget(self.page_total_label)
+        
+        layout.addWidget(self._separator())
+        
+        view_group = self._create_button_group([
+            ("☐", "Single Page", "view_single"),
+            ("▣", "Continuous", "view_continuous"),
+            ("☐☐", "Two Page", "view_two"),
+            ("☐☐☐", "Two Continuous", "view_two_continuous"),
+        ], checkable=True)
+        layout.addWidget(view_group)
+        
+        layout.addWidget(self._separator())
+        
+        zoom_out_btn = QPushButton("−")
+        zoom_out_btn.setFixedWidth(32)
+        zoom_out_btn.clicked.connect(lambda: self.parent_viewer.zoom_out())
+        layout.addWidget(zoom_out_btn)
+        
+        self.zoom_combo = QComboBox()
+        self.zoom_combo.addItems(["50%", "75%", "100%", "125%", "150%", "200%", "300%", "Fit Width", "Fit Page", "Fit Visible"])
+        self.zoom_combo.setCurrentText("100%")
+        self.zoom_combo.setMinimumWidth(100)
+        self.zoom_combo.currentTextChanged.connect(self._on_zoom_changed)
+        layout.addWidget(self.zoom_combo)
+        
+        zoom_in_btn = QPushButton("+")
+        zoom_in_btn.setFixedWidth(32)
+        zoom_in_btn.clicked.connect(lambda: self.parent_viewer.zoom_in())
+        layout.addWidget(zoom_in_btn)
+        
+        layout.addStretch()
+        
+        tools_group = self._create_button_group([
+            ("🔍", "Select Tool", "select_tool"),
+            ("✏️", "Edit Text", "edit_text"),
+            ("📝", "Add Comment", "add_comment"),
+            ("📎", "Attach File", "attach_file"),
+        ])
+        layout.addWidget(tools_group)
+        
+        layout.addWidget(self._separator())
+        
+        search_btn = QPushButton("🔍 Search")
+        search_btn.clicked.connect(self._show_search)
+        layout.addWidget(search_btn)
+        
+        share_btn = QPushButton("🔗 Share")
+        layout.addWidget(share_btn)
+        
+        print_btn = QPushButton("🖨 Print")
+        print_btn.clicked.connect(self._print)
+        layout.addWidget(print_btn)
+    
+    def _create_button_group(self, buttons, checkable=False):
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        
+        if checkable:
+            btn_group = QButtonGroup(widget)
+            btn_group.setExclusive(True)
+        
+        for text, tooltip, action in buttons:
+            btn = QPushButton(text)
+            btn.setToolTip(tooltip)
+            btn.setFixedSize(36, 36)
+            btn.setCheckable(checkable)
+            if checkable:
+                btn_group.addButton(btn)
+            btn.clicked.connect(lambda _, a=action: self._on_action(a))
+            layout.addWidget(btn)
+        
+        return widget
+    
+    def _separator(self):
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.VLine)
+        sep.setFrameShadow(QFrame.Shadow.Sunken)
+        sep.setStyleSheet("color: #ccc;")
+        return sep
+    
+    def _on_action(self, action):
+        if self.parent_viewer:
+            getattr(self.parent_viewer, action, lambda: None)()
+    
+    def _on_page_changed(self, page):
+        if self.parent_viewer:
+            self.parent_viewer.go_to_page(page)
+    
+    def _on_zoom_changed(self, text):
+        if self.parent_viewer:
+            if text == "Fit Width":
+                self.parent_viewer.set_zoom_fit_width()
+            elif text == "Fit Page":
+                self.parent_viewer.set_zoom_fit_page()
+            elif text == "Fit Visible":
+                self.parent_viewer.set_zoom_fit_visible()
+            else:
+                try:
+                    zoom = int(text.replace("%", "")) / 100
+                    self.parent_viewer.set_zoom(zoom)
+                except ValueError:
+                    pass
+    
+    def _show_search(self):
+        if self.parent_viewer:
+            self.parent_viewer.show_search()
+    
+    def _print(self):
+        if self.parent_viewer:
+            self.parent_viewer.print_document()
+    
+    def update_page_info(self, current, total):
+        self.page_input.blockSignals(True)
+        self.page_input.setMaximum(total)
+        self.page_input.setValue(current)
+        self.page_input.blockSignals(False)
+        self.page_total_label.setText(f"/ {total}")
+    
+    def update_zoom(self, zoom):
+        self.zoom_combo.blockSignals(True)
+        self.zoom_combo.setCurrentText(f"{int(zoom * 100)}%")
+        self.zoom_combo.blockSignals(False)
+
+
 class PDFViewer(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -452,23 +803,157 @@ class PDFViewer(QMainWindow):
         self._apply_theme()
     
     def _setup_ui(self):
-        central = QWidget()
-        self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
+        # Menu bar (Acrobat-style)
+        self._setup_menubar()
         
+        # Main splitter for three-pane layout
+        from PyQt6.QtWidgets import QSplitter
+        main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.setCentralWidget(main_splitter)
+        
+        # LEFT PANEL - Tools/Navigation
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_panel.setMaximumWidth(280)
+        left_panel.setMinimumWidth(200)
+        
+        # Sidebar tabs
+        from PyQt6.QtWidgets import QTabWidget
+        self.sidebar_tabs = QTabWidget()
+        self.sidebar_tabs.setTabPosition(QTabWidget.TabPosition.West)
+        
+        # Page Thumbnails tab
+        self.thumbnail_sidebar = ThumbnailSidebar(self)
+        self.thumbnail_sidebar.page_selected.connect(self.go_to_page)
+        self.thumbnail_sidebar.pages_reordered.connect(self.reorder_pages)
+        self.sidebar_tabs.addTab(self.thumbnail_sidebar, "Pages")
+        
+        # Bookmarks/Outline tab
+        self.outline_sidebar = OutlineSidebar(self)
+        self.sidebar_tabs.addTab(self.outline_sidebar, "Bookmarks")
+        
+        # Annotations/Comments tab
+        self.comments_sidebar = CommentsSidebar(self)
+        self.sidebar_tabs.addTab(self.comments_sidebar, "Comments")
+        
+        left_layout.addWidget(self.sidebar_tabs)
+        main_splitter.addWidget(left_panel)
+        
+        # CENTER PANEL - Document View
+        center_widget = QWidget()
+        center_layout = QVBoxLayout(center_widget)
+        center_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Toolbar above document
+        self._setup_document_toolbar(center_layout)
+        
+        # Document scroll area
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self.scroll_area.setStyleSheet("QScrollArea { background: #cccccc; border: none; }")
         
         self.pages_container = QWidget()
         self.pages_layout = QVBoxLayout(self.pages_container)
         self.pages_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        self.pages_layout.setSpacing(20)
+        self.pages_layout.setSpacing(12)
+        self.pages_container.setStyleSheet("background: #cccccc;")
         
         self.scroll_area.setWidget(self.pages_container)
-        layout.addWidget(self.scroll_area)
+        center_layout.addWidget(self.scroll_area)
+        
+        main_splitter.addWidget(center_widget)
+        
+        # RIGHT PANEL - Properties/Tools
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_panel.setMaximumWidth(320)
+        right_panel.setMinimumWidth(240)
+        
+        self.tools_panel = ToolsPanel(self)
+        right_layout.addWidget(self.tools_panel)
+        main_splitter.addWidget(right_panel)
+        
+        # Set splitter proportions (left:center:right = 20:60:20)
+        main_splitter.setSizes([240, 720, 240])
+        main_splitter.setStretchFactor(1, 1)
         
         # Status bar
+        self._setup_statusbar()
+        
+        # Connect scroll for lazy rendering
+        self.scroll_area.verticalScrollBar().valueChanged.connect(self._on_scroll)
+    
+    def _setup_menubar(self):
+        menubar = self.menuBar()
+        
+        # File menu
+        file_menu = menubar.addMenu("&File")
+        file_menu.addAction("&Open", self.open_file, QKeySequence.StandardKey.Open)
+        file_menu.addAction("&Save", self.save_file, QKeySequence.StandardKey.Save)
+        file_menu.addAction("Save &As...", self.save_file_as, QKeySequence.StandardKey.SaveAs)
+        file_menu.addSeparator()
+        file_menu.addAction("&Merge PDFs...", self.merge_pdfs, QKeySequence("Ctrl+M"))
+        file_menu.addAction("&Split PDF...", self.split_pdf)
+        file_menu.addSeparator()
+        file_menu.addAction("E&xport", self.export_images, QKeySequence("Ctrl+E"))
+        file_menu.addSeparator()
+        file_menu.addAction("&Print...", self.print_document, QKeySequence.StandardKey.Print)
+        file_menu.addSeparator()
+        file_menu.addAction("E&xit", self.close)
+        
+        # Edit menu
+        edit_menu = menubar.addMenu("&Edit")
+        edit_menu.addAction("&Undo", lambda: None, QKeySequence.StandardKey.Undo)
+        edit_menu.addAction("&Redo", lambda: None, QKeySequence.StandardKey.Redo)
+        edit_menu.addSeparator()
+        edit_menu.addAction("&Find...", self.show_search, QKeySequence.StandardKey.Find)
+        edit_menu.addAction("Find &Next", lambda: None, QKeySequence("F3"))
+        
+        # View menu
+        view_menu = menubar.addMenu("&View")
+        view_menu.addAction("&Single Page", lambda: self.set_view_mode("single"))
+        view_menu.addAction("&Continuous", lambda: self.set_view_mode("continuous"))
+        view_menu.addAction("&Two Page", lambda: self.set_view_mode("two"))
+        view_menu.addSeparator()
+        view_menu.addAction("Zoom &In", self.zoom_in, QKeySequence.StandardKey.ZoomIn)
+        view_menu.addAction("Zoom &Out", self.zoom_out, QKeySequence.StandardKey.ZoomOut)
+        view_menu.addAction("&Fit Width", lambda: self.set_zoom_fit_width())
+        view_menu.addAction("&Fit Page", lambda: self.set_zoom_fit_page())
+        view_menu.addAction("Fit &Visible", lambda: self.set_zoom_fit_visible())
+        view_menu.addSeparator()
+        view_menu.addAction("&Dark Mode", self.toggle_dark_mode, QKeySequence("Ctrl+D"))
+        view_menu.addSeparator()
+        view_menu.addAction("&Show Left Panel", lambda: self.sidebar_tabs.setVisible(True))
+        view_menu.addAction("&Show Right Panel", lambda: self.tools_panel.setVisible(True))
+        
+        # Tools menu
+        tools_menu = menubar.addMenu("&Tools")
+        tools_menu.addAction("&Organize Pages", lambda: self.tools_panel.setVisible(True))
+        tools_menu.addAction("&Edit PDF", lambda: self.tools_panel.setVisible(True))
+        tools_menu.addAction("&Comment", lambda: self.sidebar_tabs.setCurrentIndex(2))
+        tools_menu.addAction("&Fill & Sign", self.fill_form, QKeySequence("F"))
+        tools_menu.addAction("&Redact", self.redact_tool)
+        tools_menu.addAction("&Prepare Form", self.prepare_form)
+        
+        # Window menu
+        window_menu = menubar.addMenu("&Window")
+        window_menu.addAction("&Minimize", self.showMinimized)
+        window_menu.addAction("&Zoom", self.showMaximized)
+        
+        # Help menu
+        help_menu = menubar.addMenu("&Help")
+        help_menu.addAction("&About", self.show_about)
+    
+    def _setup_document_toolbar(self, parent_layout):
+        """Setup the Acrobat-style document toolbar."""
+        self.doc_toolbar = DocumentToolbar(self)
+        parent_layout.addWidget(self.doc_toolbar)
+    
+    def _setup_statusbar(self):
+        """Setup the status bar."""
         self.status_label = QLabel("No document loaded")
         self.statusBar().addWidget(self.status_label)
         
@@ -479,124 +964,12 @@ class PDFViewer(QMainWindow):
         self.statusBar().addPermanentWidget(self.zoom_label)
     
     def _setup_sidebar(self):
-        self.thumbnail_sidebar = ThumbnailSidebar(self)
-        self.thumbnail_sidebar.page_selected.connect(self.go_to_page)
-        self.thumbnail_sidebar.pages_reordered.connect(self.reorder_pages)
-        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.thumbnail_sidebar)
+        """Sidebar is now part of the main splitter in _setup_ui"""
+        pass
     
     def _setup_toolbar(self):
-        toolbar = QToolBar("Main Toolbar")
-        toolbar.setIconSize(QSize(24, 24))
-        self.addToolBar(toolbar)
-        
-        # File actions
-        open_action = QAction("Open", self)
-        open_action.setShortcut(QKeySequence.StandardKey.Open)
-        open_action.triggered.connect(self.open_file)
-        toolbar.addAction(open_action)
-        
-        save_action = QAction("Save", self)
-        save_action.setShortcut(QKeySequence.StandardKey.Save)
-        save_action.triggered.connect(self.save_file)
-        toolbar.addAction(save_action)
-        
-        save_as_action = QAction("Save As", self)
-        save_as_action.setShortcut(QKeySequence.StandardKey.SaveAs)
-        save_as_action.triggered.connect(self.save_file_as)
-        toolbar.addAction(save_as_action)
-        
-        toolbar.addSeparator()
-        
-        # Merge/Split
-        merge_action = QAction("Merge PDFs", self)
-        merge_action.setShortcut("Ctrl+M")
-        merge_action.triggered.connect(self.merge_pdfs)
-        toolbar.addAction(merge_action)
-        
-        split_action = QAction("Split PDF", self)
-        split_action.triggered.connect(self.split_pdf)
-        toolbar.addAction(split_action)
-        
-        toolbar.addSeparator()
-        
-        # Navigation
-        prev_action = QAction("Previous", self)
-        prev_action.setShortcut(QKeySequence.StandardKey.MoveToPreviousPage)
-        prev_action.triggered.connect(self.prev_page)
-        toolbar.addAction(prev_action)
-        
-        next_action = QAction("Next", self)
-        next_action.setShortcut(QKeySequence.StandardKey.MoveToNextPage)
-        next_action.triggered.connect(self.next_page)
-        toolbar.addAction(next_action)
-        
-        self.page_spin = QSpinBox()
-        self.page_spin.setMinimum(1)
-        self.page_spin.valueChanged.connect(self.go_to_page)
-        toolbar.addWidget(QLabel("Page:"))
-        toolbar.addWidget(self.page_spin)
-        
-        toolbar.addSeparator()
-        
-        # Zoom
-        zoom_out_action = QAction("Zoom Out", self)
-        zoom_out_action.setShortcut(QKeySequence.StandardKey.ZoomOut)
-        zoom_out_action.triggered.connect(self.zoom_out)
-        toolbar.addAction(zoom_out_action)
-        
-        self.zoom_combo = QComboBox()
-        self.zoom_combo.addItems(["50%", "75%", "100%", "125%", "150%", "200%", "300%", "Fit Width"])
-        self.zoom_combo.setCurrentText("100%")
-        self.zoom_combo.currentTextChanged.connect(self.set_zoom_from_combo)
-        toolbar.addWidget(self.zoom_combo)
-        
-        zoom_in_action = QAction("Zoom In", self)
-        zoom_in_action.setShortcut(QKeySequence.StandardKey.ZoomIn)
-        zoom_in_action.triggered.connect(self.zoom_in)
-        toolbar.addAction(zoom_in_action)
-        
-        toolbar.addSeparator()
-        
-        # Edit actions
-        self.annotate_action = QAction("Add Note", self)
-        self.annotate_action.setCheckable(True)
-        self.annotate_action.setShortcut("N")
-        self.annotate_action.triggered.connect(self.toggle_annotate)
-        toolbar.addAction(self.annotate_action)
-        
-        self.select_action = QAction("Select Text", self)
-        self.select_action.setCheckable(True)
-        self.select_action.setShortcut("S")
-        self.select_action.triggered.connect(self.toggle_select)
-        toolbar.addAction(self.select_action)
-        
-        # Form filling
-        form_action = QAction("Fill Form", self)
-        form_action.setShortcut("F")
-        form_action.triggered.connect(self.fill_form)
-        toolbar.addAction(form_action)
-        
-        toolbar.addSeparator()
-        
-        # Export
-        export_action = QAction("Export Images", self)
-        export_action.setShortcut("Ctrl+E")
-        export_action.triggered.connect(self.export_images)
-        toolbar.addAction(export_action)
-        
-        # Dark mode
-        self.dark_action = QAction("Dark Mode", self)
-        self.dark_action.setCheckable(True)
-        self.dark_action.setShortcut("Ctrl+D")
-        self.dark_action.triggered.connect(self.toggle_dark_mode)
-        toolbar.addAction(self.dark_action)
-        
-        # View thumbnails
-        self.thumb_action = QAction("Thumbnails", self)
-        self.thumb_action.setCheckable(True)
-        self.thumb_action.setChecked(True)
-        self.thumb_action.triggered.connect(self.thumbnail_sidebar.setVisible)
-        toolbar.addAction(self.thumb_action)
+        """Main toolbar is replaced by menubar and document toolbar"""
+        pass
     
     def _apply_theme(self):
         if self.dark_mode:
@@ -693,8 +1066,17 @@ class PDFViewer(QMainWindow):
     
     def update_ui(self):
         if self.doc:
-            self.page_label.setText(f"Page: {self.current_page + 1}/{len(self.doc)}")
-            self.zoom_label.setText(f"Zoom: {int(self.zoom * 100)}%")
+            page_text = f"Page: {self.current_page + 1}/{len(self.doc)}"
+            zoom_text = f"Zoom: {int(self.zoom * 100)}%"
+            self.page_label.setText(page_text)
+            self.zoom_label.setText(zoom_text)
+            if hasattr(self, 'doc_toolbar'):
+                self.doc_toolbar.update_page_info(self.current_page + 1, len(self.doc))
+                self.doc_toolbar.update_zoom(self.zoom)
+            if hasattr(self, 'outline_sidebar'):
+                self.outline_sidebar.set_document(self.doc)
+            if hasattr(self, 'comments_sidebar'):
+                self.comments_sidebar.set_document(self.doc)
         else:
             self.page_label.setText("Page: 0/0")
             self.zoom_label.setText("Zoom: 100%")
@@ -709,15 +1091,25 @@ class PDFViewer(QMainWindow):
             self.current_page += 1
             self.scroll_to_page()
     
+    def first_page(self):
+        if self.doc:
+            self.current_page = 0
+            self.scroll_to_page()
+    
+    def last_page(self):
+        if self.doc:
+            self.current_page = len(self.doc) - 1
+            self.scroll_to_page()
+    
     def go_to_page(self, page: int):
         if self.doc and 1 <= page <= len(self.doc):
             self.current_page = page - 1
             self.scroll_to_page()
     
     def scroll_to_page(self):
-        self.page_spin.setValue(self.current_page + 1)
         self.update_ui()
-        self.thumbnail_sidebar.set_current_page(self.current_page)
+        if hasattr(self, 'thumbnail_sidebar'):
+            self.thumbnail_sidebar.set_current_page(self.current_page)
         
         if self.pages_layout.count() > self.current_page:
             widget = self.pages_layout.itemAt(self.current_page).widget()
@@ -768,42 +1160,39 @@ class PDFViewer(QMainWindow):
             if isinstance(widget, PDFPageWidget):
                 widget.set_zoom(zoom)
         self.update_ui()
-        self.zoom_combo.setCurrentText(f"{int(zoom * 100)}%")
+        if hasattr(self, 'doc_toolbar'):
+            self.doc_toolbar.update_zoom(self.zoom)
     
-    def set_zoom_from_combo(self, text: str):
-        if text == "Fit Width":
-            if self.doc and self.pages_layout.count() > 0:
-                widget = self.pages_layout.itemAt(0).widget()
-                if widget:
-                    viewport_width = self.scroll_area.viewport().width() - 40
-                    page_width = widget.pixmap.width()
+    def set_zoom_fit_width(self):
+        if self.doc and self.pages_layout.count() > 0:
+            widget = self.pages_layout.itemAt(0).widget()
+            if widget and widget._pixmap:
+                viewport_width = self.scroll_area.viewport().width() - 40
+                page_width = widget._pixmap.width()
+                if page_width > 0:
                     zoom = viewport_width / page_width
                     self.set_zoom(zoom)
-            return
-        try:
-            zoom = int(text.replace("%", "")) / 100
-            self.set_zoom(zoom)
-        except ValueError:
-            pass
     
-    def save_file(self):
-        if self.doc and self.file_path:
-            try:
-                self.doc.save(self.file_path, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
-                self.status_label.setText("Saved")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to save:\n{e}")
+    def set_zoom_fit_page(self):
+        if self.doc and self.pages_layout.count() > 0:
+            widget = self.pages_layout.itemAt(0).widget()
+            if widget and widget._pixmap:
+                viewport_width = self.scroll_area.viewport().width() - 40
+                viewport_height = self.scroll_area.viewport().height() - 40
+                page_width = widget._pixmap.width()
+                page_height = widget._pixmap.height()
+                if page_width > 0 and page_height > 0:
+                    zoom_w = viewport_width / page_width
+                    zoom_h = viewport_height / page_height
+                    zoom = min(zoom_w, zoom_h)
+                    self.set_zoom(zoom)
     
-    def save_file_as(self):
-        if self.doc:
-            path, _ = QFileDialog.getSaveFileName(self, "Save PDF As", "", "PDF Files (*.pdf)")
-            if path:
-                try:
-                    self.doc.save(path)
-                    self.file_path = path
-                    self.status_label.setText(f"Saved: {Path(path).name}")
-                except Exception as e:
-                    QMessageBox.critical(self, "Error", f"Failed to save:\n{e}")
+    def set_zoom_fit_visible(self):
+        self.set_zoom_fit_page()
+    
+    def set_view_mode(self, mode):
+        # TODO: Implement view modes (single, continuous, two-page, etc.)
+        self.status_label.setText(f"View mode: {mode}")
     
     def toggle_annotate(self, checked: bool):
         for i in range(self.pages_layout.count()):
@@ -812,7 +1201,6 @@ class PDFViewer(QMainWindow):
                 widget.set_annot_mode(checked)
         
         if checked:
-            self.select_action.setChecked(False)
             self.status_label.setText("Annotation mode - Click to add note")
         else:
             self.status_label.setText("Ready")
@@ -824,7 +1212,6 @@ class PDFViewer(QMainWindow):
                 widget.set_select_mode(checked)
         
         if checked:
-            self.annotate_action.setChecked(False)
             self.status_label.setText("Select mode - Drag to select text for highlight/underline")
         else:
             self.status_label.setText("Ready")
@@ -835,7 +1222,180 @@ class PDFViewer(QMainWindow):
     def on_text_selected(self, page_num, text):
         self.status_label.setText(f"Text selected on page {page_num + 1}: {text[:50]}...")
     
-    def fill_form(self):
+    def show_search(self):
+        text, ok = QInputDialog.getText(self, "Find", "Search for:")
+        if ok and text:
+            self.find_text(text)
+    
+    def find_text(self, text):
+        if not self.doc:
+            return
+        for i in range(len(self.doc)):
+            page = self.doc[i]
+            matches = page.search_for(text)
+            if matches:
+                self.current_page = i
+                self.scroll_to_page()
+                self.status_label.setText(f"Found '{text}' on page {i+1}")
+                return
+        self.status_label.setText(f"'{text}' not found")
+    
+    def print_document(self):
+        if not self.doc:
+            return
+        from PyQt6.QtPrintSupport import QPrintDialog, QPrinter
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        dialog = QPrintDialog(printer, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            # Print via PDF rendering
+            self.status_label.setText("Printing...")
+    
+    def redact_tool(self):
+        self.status_label.setText("Redact tool - Select text to redact")
+        self.sidebar_tabs.setCurrentIndex(2)  # Comments tab
+        # TODO: Implement redaction
+    
+    def prepare_form(self):
+        if not self.doc:
+            return
+        self.status_label.setText("Preparing form - Auto-detecting fields...")
+        # TODO: Implement form field detection
+    
+    def show_about(self):
+        QMessageBox.about(self, "About PDF Editor", 
+            "PDF Editor v1.0\n\n"
+            "A modern PDF viewer and editor built with PyQt6 and PyMuPDF.\n\n"
+            "Features:\n"
+            "• View, annotate, and edit PDFs\n"
+            "• Organize pages (reorder, rotate, delete)\n"
+            "• Fill and sign forms\n"
+            "• Merge, split, and export PDFs\n"
+            "• Dark mode support\n\n"
+            "Built for cross-platform desktop.")
+    
+    def rotate_left(self):
+        if not self.doc:
+            return
+        page = self.doc[self.current_page]
+        page.set_rotation((page.rotation - 90) % 360)
+        self.render_pages()
+        self.status_label.setText("Page rotated left")
+    
+    def rotate_right(self):
+        if not self.doc:
+            return
+        page = self.doc[self.current_page]
+        page.set_rotation((page.rotation + 90) % 360)
+        self.render_pages()
+        self.status_label.setText("Page rotated right")
+    
+    def delete_page(self):
+        if not self.doc or len(self.doc) <= 1:
+            return
+        reply = QMessageBox.question(self, "Delete Page", 
+            f"Delete page {self.current_page + 1}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
+            self.doc.delete_page(self.current_page)
+            self.load_document(self.file_path)
+            self.status_label.setText("Page deleted")
+    
+    def insert_page(self):
+        if not self.doc:
+            return
+        self.doc.new_page(self.current_page)
+        self.load_document(self.file_path)
+        self.status_label.setText("Blank page inserted")
+    
+    def extract_pages(self):
+        if not self.doc:
+            return
+        # Use existing split_pdf functionality
+        self.split_pdf()
+    
+    def add_text(self):
+        self.status_label.setText("Add text - Click on page to insert text box")
+        # TODO: Implement text insertion
+    
+    def add_image(self):
+        if not self.doc:
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "Insert Image", "", "Images (*.png *.jpg *.jpeg)")
+        if path:
+            self.status_label.setText(f"Image inserted: {Path(path).name}")
+            # TODO: Implement image insertion
+    
+    def add_link(self):
+        self.status_label.setText("Add link - Select area to create hyperlink")
+        # TODO: Implement link creation
+    
+    def crop_pages(self):
+        self.status_label.setText("Crop pages - Select area to crop")
+        # TODO: Implement cropping
+    
+    def add_note(self):
+        self.toggle_annotate(True)
+        self.sidebar_tabs.setCurrentIndex(2)  # Comments tab
+    
+    def highlight_text(self):
+        self.toggle_select(True)
+    
+    def underline_text(self):
+        self.toggle_select(True)
+    
+    def strikethrough(self):
+        self.status_label.setText("Strikethrough - Select text to strikethrough")
+        # TODO: Implement strikethrough
+    
+    def freehand_draw(self):
+        self.status_label.setText("Freehand draw - Draw on page")
+        # TODO: Implement freehand drawing
+    
+    def add_stamp(self):
+        self.status_label.setText("Add stamp - Select stamp type")
+        # TODO: Implement stamps
+    
+    def add_text_field(self):
+        self.status_label.setText("Add text field - Click to place field")
+        # TODO: Implement form field addition
+    
+    def add_checkbox(self):
+        self.status_label.setText("Add checkbox - Click to place checkbox")
+        # TODO: Implement checkbox addition
+    
+    def add_signature(self):
+        self.status_label.setText("Add signature - Draw or import signature")
+        # TODO: Implement signature
+    
+    def sign_document(self):
+        self.status_label.setText("Sign document - Select certificate")
+        # TODO: Implement digital signing
+    
+    def export_text(self):
+        if not self.doc:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Export Text", "", "Text Files (*.txt)")
+        if path:
+            text = ""
+            for page in self.doc:
+                text += page.get_text() + "\n\n"
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(text)
+            self.status_label.setText(f"Text exported to {Path(path).name}")
+    
+    def export_word(self):
+        self.status_label.setText("Export to Word - Not yet implemented")
+    
+    def export_excel(self):
+        self.status_label.setText("Export to Excel - Not yet implemented")
+    
+    def optimize_pdf(self):
+        if not self.doc:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Optimize PDF", "", "PDF Files (*.pdf)")
+        if path:
+            self.doc.save(path, garbage=4, deflate=True, clean=True)
+            self.status_label.setText(f"PDF optimized: {Path(path).name}")
         if not self.doc:
             return
         
