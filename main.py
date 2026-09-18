@@ -44,8 +44,19 @@ class PDFPageWidget(QWidget):
         # Annotation state
         self.annot_mode = False
         self.select_mode = False
+        self.redact_mode = False
+        self.draw_mode = False
+        self.stamp_mode = False
         self.selection_start = None
         self.selection_end = None
+        
+        # Freehand drawing
+        self.draw_path = []
+        self.draw_paths = []  # List of completed paths
+        
+        # Redaction
+        self.redact_rects = []  # List of redaction rectangles
+        self.redact_preview = None  # Current redaction preview rect
         
         # Highlights storage
         self.highlights = []
@@ -90,7 +101,34 @@ class PDFPageWidget(QWidget):
     def set_select_mode(self, enabled: bool):
         self.select_mode = enabled
         self.annot_mode = False
+        self.redact_mode = False
+        self.draw_mode = False
+        self.stamp_mode = False
         self.setCursor(Qt.CursorShape.IBeamCursor if enabled else Qt.CursorShape.ArrowCursor)
+    
+    def set_redact_mode(self, enabled: bool):
+        self.redact_mode = enabled
+        self.annot_mode = False
+        self.select_mode = False
+        self.draw_mode = False
+        self.stamp_mode = False
+        self.setCursor(Qt.CursorShape.CrossCursor if enabled else Qt.CursorShape.ArrowCursor)
+    
+    def set_draw_mode(self, enabled: bool):
+        self.draw_mode = enabled
+        self.annot_mode = False
+        self.select_mode = False
+        self.redact_mode = False
+        self.stamp_mode = False
+        self.setCursor(Qt.CursorShape.CrossCursor if enabled else Qt.CursorShape.ArrowCursor)
+    
+    def set_stamp_mode(self, enabled: bool):
+        self.stamp_mode = enabled
+        self.annot_mode = False
+        self.select_mode = False
+        self.redact_mode = False
+        self.draw_mode = False
+        self.setCursor(Qt.CursorShape.PointingHandCursor if enabled else Qt.CursorShape.ArrowCursor)
     
     def add_highlight(self, rect: fitz.Rect, color: tuple = (1, 1, 0), opacity: float = 0.3):
         """Add a highlight annotation to the page."""
@@ -113,6 +151,50 @@ class PDFPageWidget(QWidget):
             self._render_pixmap()
             self.update()
     
+    def add_redaction(self, rect: fitz.Rect):
+        """Add a redaction annotation - marks area for removal."""
+        # Add redaction annot (will be applied on save)
+        annot = self.page.add_redact_annot(rect)
+        if annot:
+            # Visual indicator - fill with black
+            annot.set_colors(fill=(0, 0, 0))
+            annot.update()
+            self.redact_rects.append(rect)
+            self._render_pixmap()
+            self.update()
+            self.annotation_added.emit(self.page_num, {"type": "redact", "rect": (rect.x0, rect.y0, rect.x1, rect.y1)})
+    
+    def apply_drawings(self):
+        """Bake freehand drawings into the page as annotations."""
+        if not self.draw_paths:
+            return
+        
+        for path in self.draw_paths:
+            if len(path) < 2:
+                continue
+            # Convert to PDF coordinates and add as ink annotation
+            pdf_points = [fitz.Point(p.x() / self.zoom, p.y() / self.zoom) for p in path]
+            annot = self.page.add_ink_annot(pdf_points)
+            if annot:
+                annot.set_colors(stroke=(0, 0, 1))  # Blue ink
+                annot.set_border_width(2)
+                annot.update()
+        
+        self.draw_paths.clear()
+        self._render_pixmap()
+        self.update()
+    
+    def add_stamp(self, point: fitz.Point, stamp_type: str = "Approved"):
+        """Add a stamp annotation."""
+        # Create a rubber stamp annotation
+        rect = fitz.Rect(point.x - 60, point.y - 30, point.x + 60, point.y + 30)
+        annot = self.page.add_stamp_annot(rect, stamp_type)
+        if annot:
+            annot.update()
+            self._render_pixmap()
+            self.update()
+            self.annotation_added.emit(self.page_num, {"type": "stamp", "point": (point.x, point.y), "stamp": stamp_type})
+    
     def mousePressEvent(self, event):
         if self.annot_mode and event.button() == Qt.MouseButton.LeftButton:
             pos = event.position()
@@ -129,10 +211,33 @@ class PDFPageWidget(QWidget):
             self.selection_start = event.position()
             self.selection_end = event.position()
             self.update()
+        
+        elif self.redact_mode and event.button() == Qt.MouseButton.LeftButton:
+            self.selection_start = event.position()
+            self.redact_preview = QRectF(self.selection_start, self.selection_start)
+            self.update()
+        
+        elif self.draw_mode and event.button() == Qt.MouseButton.LeftButton:
+            self.draw_path = [event.position()]
+            self.update()
+        
+        elif self.stamp_mode and event.button() == Qt.MouseButton.LeftButton:
+            pos = event.position()
+            pdf_x = pos.x() / self.zoom
+            pdf_y = pos.y() / self.zoom
+            self.add_stamp(fitz.Point(pdf_x, pdf_y))
     
     def mouseMoveEvent(self, event):
         if self.select_mode and self.selection_start and event.buttons() & Qt.MouseButton.LeftButton:
             self.selection_end = event.position()
+            self.update()
+        
+        elif self.redact_mode and self.selection_start and event.buttons() & Qt.MouseButton.LeftButton:
+            self.redact_preview = QRectF(self.selection_start, event.position()).normalized()
+            self.update()
+        
+        elif self.draw_mode and self.draw_path and event.buttons() & Qt.MouseButton.LeftButton:
+            self.draw_path.append(event.position())
             self.update()
     
     def mouseReleaseEvent(self, event):
@@ -161,6 +266,28 @@ class PDFPageWidget(QWidget):
             self.selection_start = None
             self.selection_end = None
             self.update()
+        
+        elif self.redact_mode and self.selection_start and self.redact_preview:
+            # Convert to PDF coordinates and add redaction
+            rect = self.redact_preview
+            x1 = rect.left() / self.zoom
+            y1 = rect.top() / self.zoom
+            x2 = rect.right() / self.zoom
+            y2 = rect.bottom() / self.zoom
+            
+            pdf_rect = fitz.Rect(x1, y1, x2, y2)
+            self.add_redaction(pdf_rect)
+            
+            self.selection_start = None
+            self.redact_preview = None
+            self.update()
+        
+        elif self.draw_mode and self.draw_path:
+            if len(self.draw_path) > 1:
+                self.draw_paths.append(self.draw_path.copy())
+                self.apply_drawings()
+            self.draw_path = []
+            self.update()
     
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -176,6 +303,22 @@ class PDFPageWidget(QWidget):
             painter.setBrush(QBrush(QColor(0, 120, 215, 50)))
             rect = QRectF(self.selection_start, self.selection_end).normalized()
             painter.drawRect(rect)
+        
+        # Redaction preview
+        if self.redact_mode and self.redact_preview:
+            painter.setPen(QPen(QColor(255, 0, 0), 2, Qt.PenStyle.DashLine))
+            painter.setBrush(QBrush(QColor(255, 0, 0, 80)))
+            painter.drawRect(self.redact_preview)
+        
+        # Current draw path
+        if self.draw_mode and self.draw_path and len(self.draw_path) > 1:
+            painter.setPen(QPen(QColor(0, 0, 255), 2, Qt.PenStyle.SolidLine))
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            for i in range(len(self.draw_path) - 1):
+                painter.drawLine(self.draw_path[i], self.draw_path[i + 1])
+        
+        # Completed draw paths (already rendered to pixmap via apply_drawings)
+        # They're baked into the pixmap now
 
 
 class ThumbnailWidget(QWidget):
@@ -891,61 +1034,170 @@ class PDFViewer(QMainWindow):
         
         # File menu
         file_menu = menubar.addMenu("&File")
-        file_menu.addAction("&Open", self.open_file, QKeySequence.StandardKey.Open)
-        file_menu.addAction("&Save", self.save_file, QKeySequence.StandardKey.Save)
-        file_menu.addAction("Save &As...", self.save_file_as, QKeySequence.StandardKey.SaveAs)
+        open_action = QAction("&Open", self)
+        open_action.setShortcut(QKeySequence.StandardKey.Open)
+        open_action.triggered.connect(self.open_file)
+        file_menu.addAction(open_action)
+        
+        save_action = QAction("&Save", self)
+        save_action.setShortcut(QKeySequence.StandardKey.Save)
+        save_action.triggered.connect(self.save_file)
+        file_menu.addAction(save_action)
+        
+        save_as_action = QAction("Save &As...", self)
+        save_as_action.setShortcut(QKeySequence.StandardKey.SaveAs)
+        save_as_action.triggered.connect(self.save_file_as)
+        file_menu.addAction(save_as_action)
+        
         file_menu.addSeparator()
-        file_menu.addAction("&Merge PDFs...", self.merge_pdfs, QKeySequence("Ctrl+M"))
-        file_menu.addAction("&Split PDF...", self.split_pdf)
+        
+        merge_action = QAction("&Merge PDFs...", self)
+        merge_action.setShortcut(QKeySequence("Ctrl+M"))
+        merge_action.triggered.connect(self.merge_pdfs)
+        file_menu.addAction(merge_action)
+        
+        split_action = QAction("&Split PDF...", self)
+        split_action.triggered.connect(self.split_pdf)
+        file_menu.addAction(split_action)
+        
         file_menu.addSeparator()
-        file_menu.addAction("E&xport", self.export_images, QKeySequence("Ctrl+E"))
+        
+        export_action = QAction("E&xport", self)
+        export_action.setShortcut(QKeySequence("Ctrl+E"))
+        export_action.triggered.connect(self.export_images)
+        file_menu.addAction(export_action)
+        
         file_menu.addSeparator()
-        file_menu.addAction("&Print...", self.print_document, QKeySequence.StandardKey.Print)
+        
+        print_action = QAction("&Print...", self)
+        print_action.setShortcut(QKeySequence.StandardKey.Print)
+        print_action.triggered.connect(self.print_document)
+        file_menu.addAction(print_action)
+        
         file_menu.addSeparator()
-        file_menu.addAction("E&xit", self.close)
+        
+        exit_action = QAction("E&xit", self)
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
         
         # Edit menu
         edit_menu = menubar.addMenu("&Edit")
-        edit_menu.addAction("&Undo", lambda: None, QKeySequence.StandardKey.Undo)
-        edit_menu.addAction("&Redo", lambda: None, QKeySequence.StandardKey.Redo)
+        undo_action = QAction("&Undo", self)
+        undo_action.setShortcut(QKeySequence.StandardKey.Undo)
+        edit_menu.addAction(undo_action)
+        
+        redo_action = QAction("&Redo", self)
+        redo_action.setShortcut(QKeySequence.StandardKey.Redo)
+        edit_menu.addAction(redo_action)
+        
         edit_menu.addSeparator()
-        edit_menu.addAction("&Find...", self.show_search, QKeySequence.StandardKey.Find)
-        edit_menu.addAction("Find &Next", lambda: None, QKeySequence("F3"))
+        
+        find_action = QAction("&Find...", self)
+        find_action.setShortcut(QKeySequence.StandardKey.Find)
+        find_action.triggered.connect(self.show_search)
+        edit_menu.addAction(find_action)
+        
+        find_next_action = QAction("Find &Next", self)
+        find_next_action.setShortcut(QKeySequence("F3"))
+        edit_menu.addAction(find_next_action)
         
         # View menu
         view_menu = menubar.addMenu("&View")
-        view_menu.addAction("&Single Page", lambda: self.set_view_mode("single"))
-        view_menu.addAction("&Continuous", lambda: self.set_view_mode("continuous"))
-        view_menu.addAction("&Two Page", lambda: self.set_view_mode("two"))
+        single_action = QAction("&Single Page", self)
+        single_action.triggered.connect(lambda: self.set_view_mode("single"))
+        view_menu.addAction(single_action)
+        
+        continuous_action = QAction("&Continuous", self)
+        continuous_action.triggered.connect(lambda: self.set_view_mode("continuous"))
+        view_menu.addAction(continuous_action)
+        
+        two_action = QAction("&Two Page", self)
+        two_action.triggered.connect(lambda: self.set_view_mode("two"))
+        view_menu.addAction(two_action)
+        
         view_menu.addSeparator()
-        view_menu.addAction("Zoom &In", self.zoom_in, QKeySequence.StandardKey.ZoomIn)
-        view_menu.addAction("Zoom &Out", self.zoom_out, QKeySequence.StandardKey.ZoomOut)
-        view_menu.addAction("&Fit Width", lambda: self.set_zoom_fit_width())
-        view_menu.addAction("&Fit Page", lambda: self.set_zoom_fit_page())
-        view_menu.addAction("Fit &Visible", lambda: self.set_zoom_fit_visible())
+        
+        zoom_in_action = QAction("Zoom &In", self)
+        zoom_in_action.setShortcut(QKeySequence.StandardKey.ZoomIn)
+        zoom_in_action.triggered.connect(self.zoom_in)
+        view_menu.addAction(zoom_in_action)
+        
+        zoom_out_action = QAction("Zoom &Out", self)
+        zoom_out_action.setShortcut(QKeySequence.StandardKey.ZoomOut)
+        zoom_out_action.triggered.connect(self.zoom_out)
+        view_menu.addAction(zoom_out_action)
+        
+        fit_width_action = QAction("&Fit Width", self)
+        fit_width_action.triggered.connect(self.set_zoom_fit_width)
+        view_menu.addAction(fit_width_action)
+        
+        fit_page_action = QAction("&Fit Page", self)
+        fit_page_action.triggered.connect(self.set_zoom_fit_page)
+        view_menu.addAction(fit_page_action)
+        
+        fit_visible_action = QAction("Fit &Visible", self)
+        fit_visible_action.triggered.connect(self.set_zoom_fit_visible)
+        view_menu.addAction(fit_visible_action)
+        
         view_menu.addSeparator()
-        view_menu.addAction("&Dark Mode", self.toggle_dark_mode, QKeySequence("Ctrl+D"))
+        
+        dark_action = QAction("&Dark Mode", self)
+        dark_action.setShortcut(QKeySequence("Ctrl+D"))
+        dark_action.triggered.connect(self.toggle_dark_mode)
+        view_menu.addAction(dark_action)
+        
         view_menu.addSeparator()
-        view_menu.addAction("&Show Left Panel", lambda: self.sidebar_tabs.setVisible(True))
-        view_menu.addAction("&Show Right Panel", lambda: self.tools_panel.setVisible(True))
+        
+        left_panel_action = QAction("&Show Left Panel", self)
+        left_panel_action.triggered.connect(lambda: self.sidebar_tabs.setVisible(True))
+        view_menu.addAction(left_panel_action)
+        
+        right_panel_action = QAction("&Show Right Panel", self)
+        right_panel_action.triggered.connect(lambda: self.tools_panel.setVisible(True))
+        view_menu.addAction(right_panel_action)
         
         # Tools menu
         tools_menu = menubar.addMenu("&Tools")
-        tools_menu.addAction("&Organize Pages", lambda: self.tools_panel.setVisible(True))
-        tools_menu.addAction("&Edit PDF", lambda: self.tools_panel.setVisible(True))
-        tools_menu.addAction("&Comment", lambda: self.sidebar_tabs.setCurrentIndex(2))
-        tools_menu.addAction("&Fill & Sign", self.fill_form, QKeySequence("F"))
-        tools_menu.addAction("&Redact", self.redact_tool)
-        tools_menu.addAction("&Prepare Form", self.prepare_form)
+        org_action = QAction("&Organize Pages", self)
+        org_action.triggered.connect(lambda: self.tools_panel.setVisible(True))
+        tools_menu.addAction(org_action)
+        
+        edit_pdf_action = QAction("&Edit PDF", self)
+        edit_pdf_action.triggered.connect(lambda: self.tools_panel.setVisible(True))
+        tools_menu.addAction(edit_pdf_action)
+        
+        comment_action = QAction("&Comment", self)
+        comment_action.triggered.connect(lambda: self.sidebar_tabs.setCurrentIndex(2))
+        tools_menu.addAction(comment_action)
+        
+        fill_sign_action = QAction("&Fill & Sign", self)
+        fill_sign_action.setShortcut(QKeySequence("F"))
+        fill_sign_action.triggered.connect(self.fill_form)
+        tools_menu.addAction(fill_sign_action)
+        
+        redact_action = QAction("&Redact", self)
+        redact_action.triggered.connect(self.redact_tool)
+        tools_menu.addAction(redact_action)
+        
+        prepare_form_action = QAction("&Prepare Form", self)
+        prepare_form_action.triggered.connect(self.prepare_form)
+        tools_menu.addAction(prepare_form_action)
         
         # Window menu
         window_menu = menubar.addMenu("&Window")
-        window_menu.addAction("&Minimize", self.showMinimized)
-        window_menu.addAction("&Zoom", self.showMaximized)
+        minimize_action = QAction("&Minimize", self)
+        minimize_action.triggered.connect(self.showMinimized)
+        window_menu.addAction(minimize_action)
+        
+        maximize_action = QAction("&Zoom", self)
+        maximize_action.triggered.connect(self.showMaximized)
+        window_menu.addAction(maximize_action)
         
         # Help menu
         help_menu = menubar.addMenu("&Help")
-        help_menu.addAction("&About", self.show_about)
+        about_action = QAction("&About", self)
+        about_action.triggered.connect(self.show_about)
+        help_menu.addAction(about_action)
     
     def _setup_document_toolbar(self, parent_layout):
         """Setup the Acrobat-style document toolbar."""
@@ -1002,6 +1254,25 @@ class PDFViewer(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(self, "Open PDF", "", "PDF Files (*.pdf)")
         if path:
             self.load_document(path)
+    
+    def save_file(self):
+        if self.doc and self.file_path:
+            try:
+                self.doc.save(self.file_path, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
+                self.status_label.setText("Saved")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to save:\n{e}")
+    
+    def save_file_as(self):
+        if self.doc:
+            path, _ = QFileDialog.getSaveFileName(self, "Save PDF As", "", "PDF Files (*.pdf)")
+            if path:
+                try:
+                    self.doc.save(path)
+                    self.file_path = path
+                    self.status_label.setText(f"Saved: {Path(path).name}")
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", f"Failed to save:\n{e}")
     
     def load_document(self, path: str):
         try:
@@ -1396,6 +1667,8 @@ class PDFViewer(QMainWindow):
         if path:
             self.doc.save(path, garbage=4, deflate=True, clean=True)
             self.status_label.setText(f"PDF optimized: {Path(path).name}")
+    
+    def fill_form(self):
         if not self.doc:
             return
         
