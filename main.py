@@ -1307,8 +1307,9 @@ class PDFViewer(QMainWindow):
             page_widget.text_selected.connect(self.on_text_selected)
             self.pages_layout.addWidget(page_widget)
         
-        self.page_spin.setMaximum(len(self.doc))
-        self.page_spin.setValue(self.current_page + 1)
+        # Update document toolbar
+        if hasattr(self, 'doc_toolbar'):
+            self.doc_toolbar.update_page_info(self.current_page + 1, len(self.doc))
         
         # Connect scroll handler for lazy rendering
         self.scroll_area.verticalScrollBar().valueChanged.connect(self._on_scroll)
