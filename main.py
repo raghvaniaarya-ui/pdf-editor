@@ -773,6 +773,7 @@ class DocumentToolbar(QWidget):
         self.parent_viewer = parent
         self.setFixedHeight(48)
         self._setup_style()
+        self._setup_layout()
     
     def _setup_style(self):
         """Setup toolbar style - will be updated by parent theme changes."""
@@ -820,55 +821,8 @@ class DocumentToolbar(QWidget):
             }
         """)
     
-    def set_dark_mode(self, enabled: bool):
-        """Update toolbar for dark/light mode."""
-        if enabled:
-            self.setStyleSheet("""
-                DocumentToolbar { 
-                    background: #2d2d2d; 
-                    border-bottom: 1px solid #444; 
-                }
-                DocumentToolbar QPushButton { 
-                    border: none; 
-                    padding: 6px 12px; 
-                    border-radius: 4px; 
-                    background: transparent;
-                    color: #ffffff;
-                    font-size: 14px;
-                }
-                DocumentToolbar QPushButton:hover { 
-                    background: #3e3e42; 
-                }
-                DocumentToolbar QPushButton:pressed { 
-                    background: #4e4e52; 
-                }
-                DocumentToolbar QPushButton:checked {
-                    background: #0078d7;
-                    color: white;
-                }
-                DocumentToolbar QComboBox { 
-                    padding: 4px 8px; 
-                    border: 1px solid #555; 
-                    border-radius: 3px;
-                    background: #3c3c3c;
-                    color: #ffffff;
-                    min-width: 100px;
-                }
-                DocumentToolbar QSpinBox {
-                    padding: 4px 8px;
-                    border: 1px solid #555;
-                    border-radius: 3px;
-                    background: #3c3c3c;
-                    color: #ffffff;
-                }
-                DocumentToolbar QLabel {
-                    color: #ffffff;
-                    font-size: 13px;
-                }
-            """)
-        else:
-            self._setup_style()
-        
+    def _setup_layout(self):
+        """Setup toolbar layout with all controls."""
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 4, 8, 4)
         layout.setSpacing(4)
@@ -943,6 +897,55 @@ class DocumentToolbar(QWidget):
         print_btn = QPushButton("🖨 Print")
         print_btn.clicked.connect(self._print)
         layout.addWidget(print_btn)
+    
+    def set_dark_mode(self, enabled: bool):
+        """Update toolbar for dark/light mode."""
+        if enabled:
+            self.setStyleSheet("""
+                DocumentToolbar { 
+                    background: #2d2d2d; 
+                    border-bottom: 1px solid #444; 
+                }
+                DocumentToolbar QPushButton { 
+                    border: none; 
+                    padding: 6px 12px; 
+                    border-radius: 4px; 
+                    background: transparent;
+                    color: #ffffff;
+                    font-size: 14px;
+                }
+                DocumentToolbar QPushButton:hover { 
+                    background: #3e3e42; 
+                }
+                DocumentToolbar QPushButton:pressed { 
+                    background: #4e4e52; 
+                }
+                DocumentToolbar QPushButton:checked {
+                    background: #0078d7;
+                    color: white;
+                }
+                DocumentToolbar QComboBox { 
+                    padding: 4px 8px; 
+                    border: 1px solid #555; 
+                    border-radius: 3px;
+                    background: #3c3c3c;
+                    color: #ffffff;
+                    min-width: 100px;
+                }
+                DocumentToolbar QSpinBox {
+                    padding: 4px 8px;
+                    border: 1px solid #555;
+                    border-radius: 3px;
+                    background: #3c3c3c;
+                    color: #ffffff;
+                }
+                DocumentToolbar QLabel {
+                    color: #ffffff;
+                    font-size: 13px;
+                }
+            """)
+        else:
+            self._setup_style()
     
     def _create_button_group(self, buttons, checkable=False):
         widget = QWidget()
