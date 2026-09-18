@@ -772,13 +772,102 @@ class DocumentToolbar(QWidget):
         super().__init__(parent)
         self.parent_viewer = parent
         self.setFixedHeight(48)
+        self._setup_style()
+    
+    def _setup_style(self):
+        """Setup toolbar style - will be updated by parent theme changes."""
         self.setStyleSheet("""
-            QWidget { background: #f0f0f0; border-bottom: 1px solid #d0d0d0; }
-            QPushButton { border: none; padding: 6px 12px; border-radius: 4px; }
-            QPushButton:hover { background: #e0e0e0; }
-            QPushButton:pressed { background: #d0d0d0; }
-            QComboBox { padding: 4px 8px; border: 1px solid #ccc; border-radius: 3px; }
+            DocumentToolbar { 
+                background: #f0f0f0; 
+                border-bottom: 1px solid #d0d0d0; 
+            }
+            DocumentToolbar QPushButton { 
+                border: none; 
+                padding: 6px 12px; 
+                border-radius: 4px; 
+                background: transparent;
+                color: #202020;
+                font-size: 14px;
+            }
+            DocumentToolbar QPushButton:hover { 
+                background: #e0e0e0; 
+            }
+            DocumentToolbar QPushButton:pressed { 
+                background: #d0d0d0; 
+            }
+            DocumentToolbar QPushButton:checked {
+                background: #0078d7;
+                color: white;
+            }
+            DocumentToolbar QComboBox { 
+                padding: 4px 8px; 
+                border: 1px solid #ccc; 
+                border-radius: 3px;
+                background: white;
+                color: #202020;
+                min-width: 100px;
+            }
+            DocumentToolbar QSpinBox {
+                padding: 4px 8px;
+                border: 1px solid #ccc;
+                border-radius: 3px;
+                background: white;
+                color: #202020;
+            }
+            DocumentToolbar QLabel {
+                color: #202020;
+                font-size: 13px;
+            }
         """)
+    
+    def set_dark_mode(self, enabled: bool):
+        """Update toolbar for dark/light mode."""
+        if enabled:
+            self.setStyleSheet("""
+                DocumentToolbar { 
+                    background: #2d2d2d; 
+                    border-bottom: 1px solid #444; 
+                }
+                DocumentToolbar QPushButton { 
+                    border: none; 
+                    padding: 6px 12px; 
+                    border-radius: 4px; 
+                    background: transparent;
+                    color: #ffffff;
+                    font-size: 14px;
+                }
+                DocumentToolbar QPushButton:hover { 
+                    background: #3e3e42; 
+                }
+                DocumentToolbar QPushButton:pressed { 
+                    background: #4e4e52; 
+                }
+                DocumentToolbar QPushButton:checked {
+                    background: #0078d7;
+                    color: white;
+                }
+                DocumentToolbar QComboBox { 
+                    padding: 4px 8px; 
+                    border: 1px solid #555; 
+                    border-radius: 3px;
+                    background: #3c3c3c;
+                    color: #ffffff;
+                    min-width: 100px;
+                }
+                DocumentToolbar QSpinBox {
+                    padding: 4px 8px;
+                    border: 1px solid #555;
+                    border-radius: 3px;
+                    background: #3c3c3c;
+                    color: #ffffff;
+                }
+                DocumentToolbar QLabel {
+                    color: #ffffff;
+                    font-size: 13px;
+                }
+            """)
+        else:
+            self._setup_style()
         
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 4, 8, 4)
@@ -806,10 +895,10 @@ class DocumentToolbar(QWidget):
         layout.addWidget(self._separator())
         
         view_group = self._create_button_group([
-            ("☐", "Single Page", "view_single"),
+            ("□", "Single Page", "view_single"),
             ("▣", "Continuous", "view_continuous"),
-            ("☐☐", "Two Page", "view_two"),
-            ("☐☐☐", "Two Continuous", "view_two_continuous"),
+            ("□□", "Two Page", "view_two"),
+            ("▣▣", "Two Continuous", "view_two_continuous"),
         ], checkable=True)
         layout.addWidget(view_group)
         
@@ -836,8 +925,8 @@ class DocumentToolbar(QWidget):
         
         tools_group = self._create_button_group([
             ("🔍", "Select Tool", "select_tool"),
-            ("✏️", "Edit Text", "edit_text"),
-            ("📝", "Add Comment", "add_comment"),
+            ("✎", "Edit Text", "edit_text"),
+            ("💬", "Add Comment", "add_comment"),
             ("📎", "Attach File", "attach_file"),
         ])
         layout.addWidget(tools_group)
@@ -1249,6 +1338,8 @@ class PDFViewer(QMainWindow):
         self.dark_mode = checked
         self._apply_theme()
         self.dark_action.setChecked(checked)
+        if hasattr(self, 'doc_toolbar'):
+            self.doc_toolbar.set_dark_mode(checked)
     
     def open_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "Open PDF", "", "PDF Files (*.pdf)")
