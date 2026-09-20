@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView
 )
-from PyQt6.QtCore import Qt, QRectF, QSize, QPoint, pyqtSignal, QTimer, QMimeData, QEvent
+from PyQt6.QtCore import Qt, QRectF, QSize, QPoint, pyqtSignal, QTimer, QMimeData, QEvent, QSettings
 from PyQt6.QtGui import (
     QAction, QIcon, QPixmap, QImage, QKeySequence,
     QPainter, QPen, QColor, QBrush, QCursor,
@@ -1650,6 +1650,236 @@ class ExportDialog(QDialog):
         }
 
 
+class DocumentPropertiesDialog(QDialog):
+    """Dialog for viewing and editing PDF metadata/properties."""
+    
+    def __init__(self, doc: fitz.Document, parent=None):
+        super().__init__(parent)
+        self.doc = doc
+        self.setWindowTitle("Document Properties")
+        self.resize(500, 500)
+        
+        layout = QVBoxLayout(self)
+        
+        # Tabs for different property categories
+        tabs = QTabWidget()
+        
+        # Description tab
+        desc_widget = QWidget()
+        desc_layout = QFormLayout(desc_widget)
+        
+        meta = doc.metadata
+        self.title_edit = QLineEdit(meta.get("title", ""))
+        self.author_edit = QLineEdit(meta.get("author", ""))
+        self.subject_edit = QLineEdit(meta.get("subject", ""))
+        self.keywords_edit = QLineEdit(meta.get("keywords", ""))
+        self.creator_edit = QLineEdit(meta.get("creator", ""))
+        self.producer_edit = QLineEdit(meta.get("producer", ""))
+        self.creation_date_edit = QLineEdit(meta.get("creationDate", ""))
+        self.mod_date_edit = QLineEdit(meta.get("modDate", ""))
+        self.creation_date_edit.setReadOnly(True)
+        self.mod_date_edit.setReadOnly(True)
+        
+        desc_layout.addRow("Title:", self.title_edit)
+        desc_layout.addRow("Author:", self.author_edit)
+        desc_layout.addRow("Subject:", self.subject_edit)
+        desc_layout.addRow("Keywords:", self.keywords_edit)
+        desc_layout.addRow("Creator:", self.creator_edit)
+        desc_layout.addRow("Producer:", self.producer_edit)
+        desc_layout.addRow("Created:", self.creation_date_edit)
+        desc_layout.addRow("Modified:", self.mod_date_edit)
+        
+        tabs.addTab(desc_widget, "Description")
+        
+        # Advanced tab
+        adv_widget = QWidget()
+        adv_layout = QFormLayout(adv_widget)
+        
+        self.page_count_label = QLabel(str(doc.page_count))
+        self.page_size_label = QLabel(f"{doc[0].rect.width:.0f} x {doc[0].rect.height:.0f} pts" if doc.page_count > 0 else "N/A")
+        self.encrypted_label = QLabel("Yes" if doc.needs_pass else "No")
+        self.pdf_version_label = QLabel(str(doc.pdf_version()))
+        self.permissions_label = QLabel(str(doc.permissions) if hasattr(doc, 'permissions') else "N/A")
+        
+        adv_layout.addRow("Pages:", self.page_count_label)
+        adv_layout.addRow("Page Size:", self.page_size_label)
+        adv_layout.addRow("Encrypted:", self.encrypted_label)
+        adv_layout.addRow("PDF Version:", self.pdf_version_label)
+        adv_layout.addRow("Permissions:", self.permissions_label)
+        
+        tabs.addTab(adv_widget, "Advanced")
+        
+        # Custom metadata tab
+        custom_widget = QWidget()
+        custom_layout = QVBoxLayout(custom_widget)
+        
+        self.custom_tree = QTreeWidget()
+        self.custom_tree.setHeaderLabels(["Key", "Value"])
+        self.custom_tree.setColumnWidth(0, 200)
+        
+        # Add existing custom metadata
+        for key, value in meta.items():
+            if key not in ["title", "author", "subject", "keywords", "creator", "producer", "creationDate", "modDate"]:
+                item = QTreeWidgetItem([key, str(value)])
+                self.custom_tree.addTopLevelItem(item)
+        
+        custom_layout.addWidget(self.custom_tree)
+        
+        btn_layout = QHBoxLayout()
+        add_btn = QPushButton("Add")
+        add_btn.clicked.connect(self._add_custom_metadata)
+        remove_btn = QPushButton("Remove")
+        remove_btn.clicked.connect(self._remove_custom_metadata)
+        btn_layout.addWidget(add_btn)
+        btn_layout.addWidget(remove_btn)
+        btn_layout.addStretch()
+        custom_layout.addLayout(btn_layout)
+        custom_layout.addWidget(self.custom_tree)
+        
+        tabs.addTab(custom_widget, "Custom Metadata")
+        
+        layout.addWidget(tabs)
+        
+        # Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Apply)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        buttons.button(QDialogButtonBox.StandardButton.Apply).clicked.connect(self.apply_changes)
+        layout.addWidget(buttons)
+    
+    def _add_custom_metadata(self):
+        key, ok = QInputDialog.getText(self, "Add Metadata", "Key:")
+        if ok and key:
+            value, ok = QInputDialog.getText(self, "Add Metadata", f"Value for '{key}':")
+            if ok:
+                item = QTreeWidgetItem([key, value])
+                self.custom_tree.addTopLevelItem(item)
+    
+    def _remove_custom_metadata(self):
+        for item in self.custom_tree.selectedItems():
+            self.custom_tree.takeTopLevelItem(self.custom_tree.indexOfTopLevelItem(item))
+    
+    def apply_changes(self):
+        meta = self.doc.metadata
+        meta["title"] = self.title_edit.text()
+        meta["author"] = self.author_edit.text()
+        meta["subject"] = self.subject_edit.text()
+        meta["keywords"] = self.keywords_edit.text()
+        meta["creator"] = self.creator_edit.text()
+        meta["producer"] = self.producer_edit.text()
+        
+        # Update custom metadata
+        for i in range(self.custom_tree.topLevelItemCount()):
+            item = self.custom_tree.topLevelItem(i)
+            meta[item.text(0)] = item.text(1)
+        
+        self.doc.set_metadata(meta)
+    
+    def accept(self):
+        self.apply_changes()
+        super().accept()
+
+
+class BatesNumberingDialog(QDialog):
+    """Dialog for adding Bates numbering to PDF pages."""
+    
+    def __init__(self, page_count: int, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Add Bates Numbering")
+        self.resize(450, 400)
+        
+        layout = QVBoxLayout(self)
+        
+        # Settings
+        form = QFormLayout()
+        
+        self.prefix = QLineEdit()
+        self.prefix.setPlaceholderText("e.g., DOC-")
+        form.addRow("Prefix:", self.prefix)
+        
+        self.suffix = QLineEdit()
+        self.suffix.setPlaceholderText("e.g., -CONF")
+        form.addRow("Suffix:", self.suffix)
+        
+        self.start_number = QSpinBox()
+        self.start_number.setRange(1, 999999)
+        self.start_number.setValue(1)
+        form.addRow("Start Number:", self.start_number)
+        
+        self.number_digits = QSpinBox()
+        self.number_digits.setRange(1, 10)
+        self.number_digits.setValue(6)
+        form.addRow("Number of Digits:", self.number_digits)
+        
+        self.font_size = QSpinBox()
+        self.font_size.setRange(6, 72)
+        self.font_size.setValue(10)
+        form.addRow("Font Size:", self.font_size)
+        
+        self.font_color_btn = QPushButton("Choose Color")
+        self.font_color_btn.clicked.connect(self.choose_color)
+        self.font_color = QColor(0, 0, 0)
+        self.font_color_btn.setStyleSheet("background-color: black; color: white;")
+        form.addRow("Font Color:", self.font_color_btn)
+        
+        self.position_combo = QComboBox()
+        self.position_combo.addItems(["Bottom Center", "Bottom Right", "Bottom Left", "Top Center", "Top Right", "Top Left"])
+        form.addRow("Position:", self.position_combo)
+        
+        self.page_range = QLineEdit(f"1-{self.parent().doc.page_count if self.parent() and hasattr(self.parent(), 'doc') else 0}")
+        form.addRow("Page Range:", self.page_range)
+        
+        layout.addLayout(form)
+        
+        # Preview
+        preview_group = QGroupBox("Preview")
+        preview_layout = QVBoxLayout(preview_group)
+        self.preview_label = QLabel("DOC-000001-CONF")
+        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_label.setStyleSheet("font-size: 14px; padding: 20px; border: 1px dashed #ccc;")
+        preview_layout.addWidget(self.preview_label)
+        layout.addWidget(preview_group)
+        
+        self.update_preview()
+        
+        # Connect signals
+        self.prefix.textChanged.connect(self.update_preview)
+        self.suffix.textChanged.connect(self.update_preview)
+        self.start_number.valueChanged.connect(self.update_preview)
+        self.number_digits.valueChanged.connect(self.update_preview)
+        
+        # Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+    
+    def choose_color(self):
+        color = QColorDialog.getColor(self.font_color, self)
+        if color.isValid():
+            self.font_color = color
+            self.font_color_btn.setStyleSheet(f"background-color: {color.name()}; color: {'white' if color.lightness() < 128 else 'black'};")
+            self.update_preview()
+    
+    def update_preview(self):
+        num = str(self.start_number.value()).zfill(self.number_digits.value())
+        text = f"{self.prefix.text()}{num}{self.suffix.text()}"
+        self.preview_label.setText(text)
+        self.preview_label.setStyleSheet(f"font-size: 14px; padding: 20px; border: 1px dashed #ccc; color: {self.font_color.name()};")
+    
+    def get_settings(self):
+        return {
+            "prefix": self.prefix.text(),
+            "suffix": self.suffix.text(),
+            "start_number": self.start_number.value(),
+            "number_digits": self.number_digits.value(),
+            "font_size": self.font_size.value(),
+            "color": (self.font_color.redF(), self.font_color.greenF(), self.font_color.blueF()),
+            "position": self.position_combo.currentText().lower().replace(" ", "_"),
+            "page_range": self.page_range.text()
+        }
+
+
 # ============ END DIALOG CLASSES ============
 
 
@@ -1665,6 +1895,9 @@ class PDFViewer(QMainWindow):
         self.dark_mode = False
         self.current_theme = "light"
         self.file_path = ""
+        self.recent_files = []
+        self.max_recent_files = 10
+        self._load_recent_files()
         
         self._setup_ui()
         self._setup_sidebar()
@@ -1764,6 +1997,12 @@ class PDFViewer(QMainWindow):
         open_action.setShortcut(QKeySequence.StandardKey.Open)
         open_action.triggered.connect(self.open_file)
         file_menu.addAction(open_action)
+        
+        # Recent files submenu
+        self.recent_menu = file_menu.addMenu("Recent Files")
+        self.update_recent_menu()
+        
+        file_menu.addSeparator()
         
         save_action = QAction("&Save", self)
         save_action.setShortcut(QKeySequence.StandardKey.Save)
@@ -1954,6 +2193,27 @@ class PDFViewer(QMainWindow):
         batch_action = QAction("&Batch Process...", self)
         batch_action.triggered.connect(self.batch_process)
         tools_menu.addAction(batch_action)
+        
+        tools_menu.addSeparator()
+        
+        props_action = QAction("Document &Properties...", self)
+        props_action.setShortcut(QKeySequence("Ctrl+I"))
+        props_action.triggered.connect(self.show_document_properties)
+        tools_menu.addAction(props_action)
+        
+        bates_action = QAction("Add &Bates Numbering...", self)
+        bates_action.triggered.connect(self.add_bates_numbering)
+        tools_menu.addAction(bates_action)
+        
+        search_replace_action = QAction("Search & Replace...", self)
+        search_replace_action.setShortcut(QKeySequence("Ctrl+H"))
+        search_replace_action.triggered.connect(self.search_and_replace)
+        tools_menu.addAction(search_replace_action)
+        
+        shortcuts_action = QAction("Keyboard &Shortcuts...", self)
+        shortcuts_action.setShortcut(QKeySequence("Ctrl+K"))
+        shortcuts_action.triggered.connect(self.show_shortcuts_dialog)
+        tools_menu.addAction(shortcuts_action)
         
         # Window menu
         window_menu = menubar.addMenu("&Window")
@@ -2326,6 +2586,50 @@ class PDFViewer(QMainWindow):
         if path:
             self.load_document(path)
     
+    def _load_recent_files(self):
+        settings = QSettings("PDFEditor", "RecentFiles")
+        self.recent_files = settings.value("recentFiles", [])
+        if not isinstance(self.recent_files, list):
+            self.recent_files = []
+    
+    def _save_recent_files(self):
+        settings = QSettings("PDFEditor", "RecentFiles")
+        settings.setValue("recentFiles", self.recent_files)
+    
+    def add_recent_file(self, path: str):
+        if path in self.recent_files:
+            self.recent_files.remove(path)
+        self.recent_files.insert(0, path)
+        self.recent_files = self.recent_files[:self.max_recent_files]
+        self._save_recent_files()
+        self.update_recent_menu()
+    
+    def update_recent_menu(self):
+        self.recent_menu.clear()
+        if not self.recent_files:
+            no_recent = QAction("No recent files", self)
+            no_recent.setEnabled(False)
+            self.recent_menu.addAction(no_recent)
+            return
+        
+        for i, path in enumerate(self.recent_files):
+            name = Path(path).name
+            action = QAction(f"{i+1}. {name}", self)
+            action.setToolTip(path)
+            action.setData(path)
+            action.triggered.connect(lambda _, p=path: self.load_document(p))
+            self.recent_menu.addAction(action)
+        
+        self.recent_menu.addSeparator()
+        clear_action = QAction("Clear Recent Files", self)
+        clear_action.triggered.connect(self.clear_recent_files)
+        self.recent_menu.addAction(clear_action)
+    
+    def clear_recent_files(self):
+        self.recent_files.clear()
+        self._save_recent_files()
+        self.update_recent_menu()
+    
     def save_file(self):
         if self.doc and self.file_path:
             try:
@@ -2357,6 +2661,7 @@ class PDFViewer(QMainWindow):
             self.update_ui()
             self.thumbnail_sidebar.update_thumbnails(self.doc)
             self.status_label.setText(f"Loaded: {Path(path).name}")
+            self.add_recent_file(path)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to open PDF:\n{e}")
     
@@ -2615,6 +2920,225 @@ class PDFViewer(QMainWindow):
             "• Merge, split, and export PDFs\n"
             "• Dark mode support\n\n"
             "Built for cross-platform desktop.")
+    
+    def show_document_properties(self):
+        if not self.doc:
+            return
+        dialog = DocumentPropertiesDialog(self.doc, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.status_label.setText("Document properties updated")
+            if self.file_path:
+                try:
+                    self.doc.save(self.file_path, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
+                except:
+                    pass
+    
+    def add_bates_numbering(self):
+        if not self.doc:
+            return
+        dialog = BatesNumberingDialog(len(self.doc), self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            settings = dialog.get_settings()
+            
+            path, _ = QFileDialog.getSaveFileName(self, "Save Bates Numbered PDF", "", "PDF Files (*.pdf)")
+            if not path:
+                return
+            
+            try:
+                page_range = settings["page_range"]
+                pages = []
+                for part in page_range.split(","):
+                    if "-" in part:
+                        start, end = map(int, part.split("-"))
+                        pages.extend(range(start - 1, end))
+                    else:
+                        pages.append(int(part) - 1)
+                
+                pages = [p for p in pages if 0 <= p < len(self.doc)]
+                
+                for i in pages:
+                    page = self.doc[i]
+                    page_num = settings["start_number"] + pages.index(i)
+                    num_str = str(page_num).zfill(settings["number_digits"])
+                    text = f"{settings['prefix']}{num_str}{settings['suffix']}"
+                    
+                    color = (settings["color"][0], settings["color"][1], settings["color"][2])
+                    
+                    rect = page.rect
+                    pos = settings["position"]
+                    if pos == "bottom_center":
+                        x = rect.width / 2 - 50
+                        y = rect.height - 30
+                    elif pos == "bottom_right":
+                        x = rect.width - 100
+                        y = rect.height - 30
+                    elif pos == "bottom_left":
+                        x = 30
+                        y = rect.height - 30
+                    elif pos == "top_center":
+                        x = rect.width / 2 - 50
+                        y = 30
+                    elif pos == "top_right":
+                        x = rect.width - 100
+                        y = 30
+                    else:
+                        x = 30
+                        y = 30
+                    
+                    page.insert_text((x, y), text, fontsize=settings["font_size"], 
+                                   fontname="helv", color=color)
+                
+                self.doc.save(path)
+                self.status_label.setText(f"Bates numbering applied: {Path(path).name}")
+                QMessageBox.information(self, "Success", "Bates numbering applied successfully.")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to apply Bates numbering:\n{e}")
+    
+    def search_and_replace(self):
+        if not self.doc:
+            return
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Search and Replace")
+        dialog.resize(400, 200)
+        
+        layout = QVBoxLayout(dialog)
+        
+        form = QFormLayout()
+        self.search_text = QLineEdit()
+        form.addRow("Find:", self.search_text)
+        
+        self.replace_text = QLineEdit()
+        form.addRow("Replace with:", self.replace_text)
+        
+        self.case_sensitive = QCheckBox("Case sensitive")
+        form.addRow("", self.case_sensitive)
+        
+        self.whole_words = QCheckBox("Whole words only")
+        form.addRow("", self.whole_words)
+        
+        layout.addLayout(form)
+        
+        btn_layout = QHBoxLayout()
+        find_btn = QPushButton("Find Next")
+        find_btn.clicked.connect(lambda: self._find_next(dialog))
+        replace_btn = QPushButton("Replace")
+        replace_btn.clicked.connect(lambda: self._replace_current(dialog))
+        replace_all_btn = QPushButton("Replace All")
+        replace_all_btn.clicked.connect(lambda: self._replace_all(dialog))
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.reject)
+        
+        btn_layout.addWidget(find_btn)
+        btn_layout.addWidget(replace_btn)
+        btn_layout.addWidget(replace_all_btn)
+        btn_layout.addWidget(close_btn)
+        layout.addLayout(btn_layout)
+        
+        dialog.exec()
+    
+    def _find_next(self, dialog):
+        if not self.doc:
+            return
+        text = self.search_text.text()
+        if not text:
+            return
+        
+        for i in range(self.current_page, len(self.doc)):
+            page = self.doc[i]
+            matches = page.search_for(text)
+            if matches:
+                self.current_page = i
+                self.scroll_to_page()
+                self.status_label.setText(f"Found on page {i+1}")
+                return
+        
+        self.status_label.setText("Not found")
+    
+    def _replace_current(self, dialog):
+        self.status_label.setText("Replace current - not fully implemented")
+    
+    def _replace_all(self, dialog):
+        self.status_label.setText("Replace all - not fully implemented")
+    
+    def show_shortcuts_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Keyboard Shortcuts")
+        dialog.resize(500, 400)
+        
+        layout = QVBoxLayout(dialog)
+        
+        shortcuts = [
+            ("File", [
+                ("Open", "Ctrl+O"),
+                ("Save", "Ctrl+S"),
+                ("Save As", "Ctrl+Shift+S"),
+                ("Print", "Ctrl+P"),
+                ("Exit", "Ctrl+Q"),
+            ]),
+            ("Edit", [
+                ("Undo", "Ctrl+Z"),
+                ("Redo", "Ctrl+Y"),
+                ("Find", "Ctrl+F"),
+                ("Find Next", "F3"),
+                ("Search & Replace", "Ctrl+H"),
+            ]),
+            ("View", [
+                ("Zoom In", "Ctrl++"),
+                ("Zoom Out", "Ctrl+-"),
+                ("Fit Width", "Ctrl+1"),
+                ("Fit Page", "Ctrl+2"),
+                ("Dark Mode", "Ctrl+D"),
+                ("Theme Selector", "Ctrl+T"),
+            ]),
+            ("Navigation", [
+                ("Next Page", "PgDn / Space"),
+                ("Previous Page", "PgUp / Shift+Space"),
+                ("First Page", "Home"),
+                ("Last Page", "End"),
+                ("Go to Page", "Ctrl+G"),
+            ]),
+            ("Tools", [
+                ("Select Tool", "V"),
+                ("Hand Tool", "H"),
+                ("Zoom Tool", "Z"),
+                ("Add Note", "N"),
+                ("Highlight", "Ctrl+Shift+H"),
+            ]),
+        ]
+        
+        tree = QTreeWidget()
+        tree.setHeaderLabels(["Category", "Action", "Shortcut"])
+        tree.setColumnWidth(0, 150)
+        tree.setColumnWidth(1, 200)
+        
+        for category, actions in shortcuts:
+            cat_item = QTreeWidgetItem([category, "", ""])
+            cat_item.setFlags(cat_item.flags() | Qt.ItemFlag.ItemIsTristate)
+            font = cat_item.font(0)
+            font.setBold(True)
+            cat_item.setFont(0, font)
+            
+            for action, shortcut in actions:
+                item = QTreeWidgetItem(["", action, shortcut])
+                cat_item.addChild(item)
+            
+            tree.addTopLevelItem(cat_item)
+        
+        tree.expandAll()
+        layout.addWidget(tree)
+        
+        btn_layout = QHBoxLayout()
+        reset_btn = QPushButton("Reset to Defaults")
+        reset_btn.clicked.connect(lambda: self.status_label.setText("Reset to defaults - not implemented"))
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        btn_layout.addStretch()
+        btn_layout.addWidget(reset_btn)
+        btn_layout.addWidget(close_btn)
+        layout.addLayout(btn_layout)
+        
+        dialog.exec()
     
     def rotate_left(self):
         if not self.doc:
