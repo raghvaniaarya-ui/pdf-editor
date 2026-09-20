@@ -940,54 +940,86 @@ class DocumentToolbar(QWidget):
         print_btn.clicked.connect(self._print)
         layout.addWidget(print_btn)
     
+    def set_theme(self, theme_name: str):
+        """Update toolbar for theme."""
+        t = self._get_theme_colors(theme_name)
+        self.setStyleSheet(f"""
+            DocumentToolbar {{ 
+                background: {t['bg']}; 
+                border-bottom: 1px solid {t['border']}; 
+            }}
+            DocumentToolbar QPushButton {{ 
+                border: none; 
+                padding: 6px 12px; 
+                border-radius: 4px; 
+                background: transparent;
+                color: {t['fg']};
+                font-size: 14px;
+            }}
+            DocumentToolbar QPushButton:hover {{ 
+                background: {t['btn_hover']}; 
+            }}
+            DocumentToolbar QPushButton:pressed {{ 
+                background: {t['btn_pressed']}; 
+            }}
+            DocumentToolbar QPushButton:checked {{
+                background: {t['btn_checked']};
+                color: {t['btn_checked_fg']};
+            }}
+            DocumentToolbar QComboBox {{ 
+                padding: 4px 8px; 
+                border: 1px solid {t['combo_border']}; 
+                border-radius: 3px;
+                background: {t['combo_bg']};
+                color: {t['combo_fg']};
+                min-width: 100px;
+            }}
+            DocumentToolbar QSpinBox {{
+                padding: 4px 8px;
+                border: 1px solid {t['spin_border']};
+                border-radius: 3px;
+                background: {t['spin_bg']};
+                color: {t['spin_fg']};
+            }}
+            DocumentToolbar QLabel {{
+                color: {t['fg']};
+                font-size: 13px;
+            }}
+        """)
+    
     def set_dark_mode(self, enabled: bool):
-        """Update toolbar for dark/light mode."""
-        if enabled:
-            self.setStyleSheet("""
-                DocumentToolbar { 
-                    background: #2d2d2d; 
-                    border-bottom: 1px solid #444; 
-                }
-                DocumentToolbar QPushButton { 
-                    border: none; 
-                    padding: 6px 12px; 
-                    border-radius: 4px; 
-                    background: transparent;
-                    color: #ffffff;
-                    font-size: 14px;
-                }
-                DocumentToolbar QPushButton:hover { 
-                    background: #3e3e42; 
-                }
-                DocumentToolbar QPushButton:pressed { 
-                    background: #4e4e52; 
-                }
-                DocumentToolbar QPushButton:checked {
-                    background: #0078d7;
-                    color: white;
-                }
-                DocumentToolbar QComboBox { 
-                    padding: 4px 8px; 
-                    border: 1px solid #555; 
-                    border-radius: 3px;
-                    background: #3c3c3c;
-                    color: #ffffff;
-                    min-width: 100px;
-                }
-                DocumentToolbar QSpinBox {
-                    padding: 4px 8px;
-                    border: 1px solid #555;
-                    border-radius: 3px;
-                    background: #3c3c3c;
-                    color: #ffffff;
-                }
-                DocumentToolbar QLabel {
-                    color: #ffffff;
-                    font-size: 13px;
-                }
-            """)
-        else:
-            self._setup_style()
+        """Legacy compatibility - use set_theme instead."""
+        self.set_theme("dark" if enabled else "light")
+    
+    def _get_theme_colors(self, theme_name: str):
+        colors = {
+            "light": {"bg": "#f0f0f0", "border": "#d0d0d0", "fg": "#202020", 
+                     "btn_hover": "#e0e0e0", "btn_pressed": "#d0d0d0", 
+                     "btn_checked": "#0078d7", "btn_checked_fg": "#ffffff",
+                     "combo_bg": "white", "combo_border": "#ccc", "combo_fg": "#202020",
+                     "spin_bg": "white", "spin_border": "#ccc", "spin_fg": "#202020"},
+            "dark": {"bg": "#2d2d2d", "border": "#444", "fg": "#ffffff",
+                    "btn_hover": "#3e3e42", "btn_pressed": "#4e4e52",
+                    "btn_checked": "#0078d7", "btn_checked_fg": "#ffffff",
+                    "combo_bg": "#3c3c3c", "combo_border": "#555", "combo_fg": "#ffffff",
+                    "spin_bg": "#3c3c3c", "spin_border": "#555", "spin_fg": "#ffffff"},
+            "blue": {"bg": "#e1e8f0", "border": "#b0c4de", "fg": "#1a2a4a",
+                    "btn_hover": "#d0d8e8", "btn_pressed": "#c0cce0",
+                    "btn_checked": "#2b5aa0", "btn_checked_fg": "#ffffff",
+                    "combo_bg": "white", "combo_border": "#b0c4de", "combo_fg": "#1a2a4a",
+                    "spin_bg": "white", "spin_border": "#b0c4de", "spin_fg": "#1a2a4a"},
+            "high_contrast": {"bg": "#000000", "border": "#ffff00", "fg": "#ffff00",
+                             "btn_hover": "#000080", "btn_pressed": "#0000ff",
+                             "btn_checked": "#ffff00", "btn_checked_fg": "#000000",
+                             "combo_bg": "#000000", "combo_border": "#ffff00", "combo_fg": "#ffff00",
+                             "spin_bg": "#000000", "spin_border": "#ffff00", "spin_fg": "#ffff00"},
+            "sepia": {"bg": "#e8dcc8", "border": "#c9b896", "fg": "#4a3f35",
+                     "btn_hover": "#dcd0c0", "btn_pressed": "#c9b896",
+                     "btn_checked": "#8b6914", "btn_checked_fg": "#f4ecd8",
+                     "combo_bg": "#faf5eb", "combo_border": "#c9b896", "combo_fg": "#4a3f35",
+                     "spin_bg": "#faf5eb", "spin_border": "#c9b896", "spin_fg": "#4a3f35"},
+        }
+        return colors.get(theme_name, colors["light"])
     
     def _create_button_group(self, buttons, checkable=False):
         widget = QWidget()
@@ -1631,6 +1663,7 @@ class PDFViewer(QMainWindow):
         self.current_page = 0
         self.zoom = 1.0
         self.dark_mode = False
+        self.current_theme = "light"
         self.file_path = ""
         
         self._setup_ui()
@@ -1839,6 +1872,11 @@ class PDFViewer(QMainWindow):
         dark_action.triggered.connect(self.toggle_dark_mode)
         view_menu.addAction(dark_action)
         
+        theme_action = QAction("&Theme Selector...", self)
+        theme_action.setShortcut(QKeySequence("Ctrl+T"))
+        theme_action.triggered.connect(self.show_theme_selector)
+        view_menu.addAction(theme_action)
+        
         view_menu.addSeparator()
         
         left_panel_action = QAction("&Show Left Panel", self)
@@ -1958,33 +1996,330 @@ class PDFViewer(QMainWindow):
         pass
     
     def _apply_theme(self):
-        if self.dark_mode:
-            self.setStyleSheet("""
-                QMainWindow, QWidget { background-color: #2b2b2b; color: #ffffff; }
-                QToolBar { background-color: #3c3c3c; border: none; spacing: 4px; }
-                QToolBar QLabel { color: #ffffff; }
-                QScrollArea { background-color: #1e1e1e; border: none; }
-                QStatusBar { background-color: #3c3c3c; color: #ffffff; }
-                QSpinBox, QComboBox { background-color: #3c3c3c; color: #ffffff; border: 1px solid #555; padding: 4px; }
-                QDockWidget { background-color: #2b2b2b; color: #ffffff; }
-                QListWidget { background-color: #1e1e1e; color: #ffffff; border: none; }
-                QMenu { background-color: #3c3c3c; color: #ffffff; border: 1px solid #555; }
-                QMenu::item:selected { background-color: #0078d7; }
-                QDialog { background-color: #2b2b2b; color: #ffffff; }
-                QLineEdit, QTextEdit { background-color: #3c3c3c; color: #ffffff; border: 1px solid #555; }
-                QPushButton { background-color: #3c3c3c; color: #ffffff; border: 1px solid #555; padding: 6px 12px; }
-                QPushButton:hover { background-color: #0078d7; }
-                QCheckBox { color: #ffffff; }
-            """)
-        else:
-            self.setStyleSheet("")
+        theme = self._get_theme(self.current_theme)
+        self.setStyleSheet(theme)
+        if hasattr(self, 'doc_toolbar'):
+            self.doc_toolbar.set_theme(self.current_theme)
+        if hasattr(self, 'sidebar_tabs'):
+            for i in range(self.sidebar_tabs.count()):
+                widget = self.sidebar_tabs.widget(i)
+                if hasattr(widget, 'set_theme'):
+                    widget.set_theme(self.current_theme)
+    
+    def _get_theme(self, theme_name: str):
+        themes = {
+            "light": {
+                "window_bg": "#ffffff",
+                "window_fg": "#202020",
+                "toolbar_bg": "#f0f0f0",
+                "toolbar_border": "#d0d0d0",
+                "scroll_bg": "#cccccc",
+                "status_bg": "#f0f0f0",
+                "status_fg": "#202020",
+                "input_bg": "#ffffff",
+                "input_fg": "#202020",
+                "input_border": "#ccc",
+                "button_bg": "transparent",
+                "button_fg": "#202020",
+                "button_hover": "#e0e0e0",
+                "button_pressed": "#d0d0d0",
+                "button_checked": "#0078d7",
+                "button_checked_fg": "#ffffff",
+                "combo_bg": "#ffffff",
+                "combo_border": "#ccc",
+                "spin_bg": "#ffffff",
+                "spin_border": "#ccc",
+                "spin_fg": "#202020",
+                "label_fg": "#202020",
+                "menu_bg": "#ffffff",
+                "menu_fg": "#202020",
+                "menu_sel_bg": "#0078d7",
+                "menu_sel_fg": "#ffffff",
+                "dialog_bg": "#ffffff",
+                "dialog_fg": "#202020",
+                "dock_bg": "#ffffff",
+                "dock_fg": "#202020",
+                "list_bg": "#ffffff",
+                "list_fg": "#202020",
+                "push_btn_bg": "#3c3c3c",
+                "push_btn_fg": "#ffffff",
+                "push_btn_border": "#555",
+                "push_btn_hover": "#0078d7",
+                "check_fg": "#202020",
+                "separator": "#ccc",
+            },
+            "dark": {
+                "window_bg": "#1e1e1e",
+                "window_fg": "#d4d4d4",
+                "toolbar_bg": "#252526",
+                "toolbar_border": "#3c3c3c",
+                "scroll_bg": "#1e1e1e",
+                "status_bg": "#007acc",
+                "status_fg": "#ffffff",
+                "input_bg": "#3c3c3c",
+                "input_fg": "#d4d4d4",
+                "input_border": "#555",
+                "button_bg": "transparent",
+                "button_fg": "#d4d4d4",
+                "button_hover": "#3e3e42",
+                "button_pressed": "#4e4e52",
+                "button_checked": "#0078d7",
+                "button_checked_fg": "#ffffff",
+                "combo_bg": "#3c3c3c",
+                "combo_border": "#555",
+                "spin_bg": "#3c3c3c",
+                "spin_border": "#555",
+                "spin_fg": "#d4d4d4",
+                "label_fg": "#d4d4d4",
+                "menu_bg": "#252526",
+                "menu_fg": "#d4d4d4",
+                "menu_sel_bg": "#0078d7",
+                "menu_sel_fg": "#ffffff",
+                "dialog_bg": "#252526",
+                "dialog_fg": "#d4d4d4",
+                "dock_bg": "#252526",
+                "dock_fg": "#d4d4d4",
+                "list_bg": "#1e1e1e",
+                "list_fg": "#d4d4d4",
+                "push_btn_bg": "#0e639c",
+                "push_btn_fg": "#ffffff",
+                "push_btn_border": "#0078d7",
+                "push_btn_hover": "#1177bb",
+                "check_fg": "#d4d4d4",
+                "separator": "#444",
+            },
+            "blue": {
+                "window_bg": "#f0f4f8",
+                "window_fg": "#1a2a4a",
+                "toolbar_bg": "#e1e8f0",
+                "toolbar_border": "#b0c4de",
+                "scroll_bg": "#dce4ec",
+                "status_bg": "#2b5aa0",
+                "status_fg": "#ffffff",
+                "input_bg": "#ffffff",
+                "input_fg": "#1a2a4a",
+                "input_border": "#b0c4de",
+                "button_bg": "transparent",
+                "button_fg": "#1a2a4a",
+                "button_hover": "#d0d8e8",
+                "button_pressed": "#c0cce0",
+                "button_checked": "#2b5aa0",
+                "button_checked_fg": "#ffffff",
+                "combo_bg": "#ffffff",
+                "combo_border": "#b0c4de",
+                "spin_bg": "#ffffff",
+                "spin_border": "#b0c4de",
+                "spin_fg": "#1a2a4a",
+                "label_fg": "#1a2a4a",
+                "menu_bg": "#ffffff",
+                "menu_fg": "#1a2a4a",
+                "menu_sel_bg": "#2b5aa0",
+                "menu_sel_fg": "#ffffff",
+                "dialog_bg": "#f0f4f8",
+                "dialog_fg": "#1a2a4a",
+                "dock_bg": "#e8edf3",
+                "dock_fg": "#1a2a4a",
+                "list_bg": "#ffffff",
+                "list_fg": "#1a2a4a",
+                "push_btn_bg": "#2b5aa0",
+                "push_btn_fg": "#ffffff",
+                "push_btn_border": "#1a3a6e",
+                "push_btn_hover": "#366ec8",
+                "check_fg": "#1a2a4a",
+                "separator": "#b0c4de",
+            },
+            "high_contrast": {
+                "window_bg": "#000000",
+                "window_fg": "#ffff00",
+                "toolbar_bg": "#000000",
+                "toolbar_border": "#ffff00",
+                "scroll_bg": "#000000",
+                "status_bg": "#0000ff",
+                "status_fg": "#ffff00",
+                "input_bg": "#000000",
+                "input_fg": "#ffff00",
+                "input_border": "#ffff00",
+                "button_bg": "transparent",
+                "button_fg": "#ffff00",
+                "button_hover": "#000080",
+                "button_pressed": "#0000ff",
+                "button_checked": "#ffff00",
+                "button_checked_fg": "#000000",
+                "combo_bg": "#000000",
+                "combo_border": "#ffff00",
+                "spin_bg": "#000000",
+                "spin_border": "#ffff00",
+                "spin_fg": "#ffff00",
+                "label_fg": "#ffff00",
+                "menu_bg": "#000000",
+                "menu_fg": "#ffff00",
+                "menu_sel_bg": "#0000ff",
+                "menu_sel_fg": "#ffff00",
+                "dialog_bg": "#000000",
+                "dialog_fg": "#ffff00",
+                "dock_bg": "#000000",
+                "dock_fg": "#ffff00",
+                "list_bg": "#000000",
+                "list_fg": "#ffff00",
+                "push_btn_bg": "#000080",
+                "push_btn_fg": "#ffff00",
+                "push_btn_border": "#ffff00",
+                "push_btn_hover": "#0000ff",
+                "check_fg": "#ffff00",
+                "separator": "#ffff00",
+            },
+            "sepia": {
+                "window_bg": "#f4ecd8",
+                "window_fg": "#4a3f35",
+                "toolbar_bg": "#e8dcc8",
+                "toolbar_border": "#c9b896",
+                "scroll_bg": "#dcd0c0",
+                "status_bg": "#8b6914",
+                "status_fg": "#f4ecd8",
+                "input_bg": "#faf5eb",
+                "input_fg": "#4a3f35",
+                "input_border": "#c9b896",
+                "button_bg": "transparent",
+                "button_fg": "#4a3f35",
+                "button_hover": "#dcd0c0",
+                "button_pressed": "#c9b896",
+                "button_checked": "#8b6914",
+                "button_checked_fg": "#f4ecd8",
+                "combo_bg": "#faf5eb",
+                "combo_border": "#c9b896",
+                "spin_bg": "#faf5eb",
+                "spin_border": "#c9b896",
+                "spin_fg": "#4a3f35",
+                "label_fg": "#4a3f35",
+                "menu_bg": "#f4ecd8",
+                "menu_fg": "#4a3f35",
+                "menu_sel_bg": "#8b6914",
+                "menu_sel_fg": "#f4ecd8",
+                "dialog_bg": "#f4ecd8",
+                "dialog_fg": "#4a3f35",
+                "dock_bg": "#e8dcc8",
+                "dock_fg": "#4a3f35",
+                "list_bg": "#faf5eb",
+                "list_fg": "#4a3f35",
+                "push_btn_bg": "#8b6914",
+                "push_btn_fg": "#f4ecd8",
+                "push_btn_border": "#6b4f10",
+                "push_btn_hover": "#a07818",
+                "check_fg": "#4a3f35",
+                "separator": "#c9b896",
+            },
+        }
+        
+        t = themes.get(theme_name, themes["light"])
+        return self._build_stylesheet(t)
+    
+    def _build_stylesheet(self, t):
+        return f"""
+            QMainWindow, QWidget {{ background-color: {t['window_bg']}; color: {t['window_fg']}; }}
+            QToolBar {{ background-color: {t['toolbar_bg']}; border: 1px solid {t['toolbar_border']}; spacing: 4px; }}
+            QToolBar QLabel {{ color: {t['label_fg']}; }}
+            QScrollArea {{ background-color: {t['scroll_bg']}; border: none; }}
+            QStatusBar {{ background-color: {t['status_bg']}; color: {t['status_fg']}; }}
+            QSpinBox, QComboBox {{ background-color: {t['spin_bg']}; color: {t['spin_fg']}; border: 1px solid {t['spin_border']}; padding: 4px; }}
+            QDockWidget {{ background-color: {t['dock_bg']}; color: {t['dock_fg']}; titlebar-close-icon: url(close.png); titlebar-normal-icon: url(undock.png); }}
+            QDockWidget::title {{ background: {t['toolbar_bg']}; color: {t['dock_fg']}; padding: 4px; }}
+            QListWidget {{ background-color: {t['list_bg']}; color: {t['list_fg']}; border: none; }}
+            QListWidget::item:selected {{ background-color: {t['menu_sel_bg']}; color: {t['menu_sel_fg']}; }}
+            QMenu {{ background-color: {t['menu_bg']}; color: {t['menu_fg']}; border: 1px solid {t['separator']}; }}
+            QMenu::item:selected {{ background-color: {t['menu_sel_bg']}; color: {t['menu_sel_fg']}; }}
+            QDialog {{ background-color: {t['dialog_bg']}; color: {t['dialog_fg']}; }}
+            QLineEdit, QTextEdit {{ background-color: {t['input_bg']}; color: {t['input_fg']}; border: 1px solid {t['input_border']}; }}
+            QPushButton {{ background-color: {t['button_bg']}; color: {t['button_fg']}; border: 1px solid {t['push_btn_border']}; padding: 6px 12px; border-radius: 4px; }}
+            QPushButton:hover {{ background-color: {t['button_hover']}; }}
+            QPushButton:pressed {{ background-color: {t['button_pressed']}; }}
+            QPushButton:checked {{ background-color: {t['button_checked']}; color: {t['button_checked_fg']}; }}
+            QCheckBox, QRadioButton {{ color: {t['check_fg']}; }}
+            QSplitter::handle {{ background-color: {t['separator']}; }}
+            QTabWidget::pane {{ border: 1px solid {t['separator']}; background: {t['window_bg']}; }}
+            QTabBar::tab {{ background: {t['toolbar_bg']}; color: {t['label_fg']}; padding: 8px 16px; border: 1px solid {t['separator']}; }}
+            QTabBar::tab:selected {{ background: {t['window_bg']}; color: {t['button_checked']}; }}
+            QGroupBox {{ border: 1px solid {t['separator']}; margin-top: 12px; color: {t['label_fg']}; }}
+            QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 4px; color: {t['label_fg']}; }}
+        """
     
     def toggle_dark_mode(self, checked: bool):
         self.dark_mode = checked
+        self.current_theme = "dark" if checked else "light"
         self._apply_theme()
         self.dark_action.setChecked(checked)
-        if hasattr(self, 'doc_toolbar'):
-            self.doc_toolbar.set_dark_mode(checked)
+    
+    def show_theme_selector(self):
+        """Show theme selector dialog."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Theme Selector")
+        dialog.resize(450, 400)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Theme preview list
+        themes = ["light", "dark", "blue", "high_contrast", "sepia"]
+        theme_names = {
+            "light": "☀️ Light",
+            "dark": "🌙 Dark", 
+            "blue": "💙 Blue Professional",
+            "high_contrast": "⚡ High Contrast",
+            "sepia": "📜 Sepia"
+        }
+        
+        theme_list = QListWidget()
+        theme_list.setIconSize(QSize(64, 48))
+        
+        for theme_id in themes:
+            item = QListWidgetItem(theme_names[theme_id])
+            item.setData(Qt.ItemDataRole.UserRole, theme_id)
+            
+            # Create a preview widget
+            preview = QWidget()
+            preview.setFixedHeight(48)
+            theme = self._get_theme(theme_id)
+            # Parse theme for preview colors (simplified)
+            if theme_id == "dark":
+                preview.setStyleSheet("background: #1e1e1e; border: 1px solid #444;")
+            elif theme_id == "blue":
+                preview.setStyleSheet("background: #f0f4f8; border: 1px solid #b0c4de;")
+            elif theme_id == "high_contrast":
+                preview.setStyleSheet("background: #000; border: 2px solid #ff0;")
+            elif theme_id == "sepia":
+                preview.setStyleSheet("background: #f4ecd8; border: 1px solid #c9b896;")
+            else:
+                preview.setStyleSheet("background: #fff; border: 1px solid #ccc;")
+            
+            item.setSizeHint(QSize(0, 56))
+            theme_list.addItem(item)
+            theme_list.setItemWidget(item, preview)
+        
+        theme_list.setCurrentRow(themes.index(self.current_theme))
+        layout.addWidget(QLabel("Select a theme:"))
+        layout.addWidget(theme_list)
+        
+        # Buttons
+        btn_layout = QHBoxLayout()
+        apply_btn = QPushButton("Apply")
+        apply_btn.clicked.connect(lambda: self._apply_selected_theme(dialog, theme_list))
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        btn_layout.addStretch()
+        btn_layout.addWidget(apply_btn)
+        btn_layout.addWidget(cancel_btn)
+        layout.addLayout(btn_layout)
+        
+        dialog.exec()
+    
+    def _apply_selected_theme(self, dialog, theme_list):
+        current_item = theme_list.currentItem()
+        if current_item:
+            theme_id = current_item.data(Qt.ItemDataRole.UserRole)
+            self.current_theme = theme_id
+            self.dark_mode = (theme_id == "dark")
+            self._apply_theme()
+            if hasattr(self, 'dark_action'):
+                self.dark_action.setChecked(self.dark_mode)
+            dialog.accept()
     
     def open_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "Open PDF", "", "PDF Files (*.pdf)")
