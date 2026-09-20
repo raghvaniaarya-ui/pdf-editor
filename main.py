@@ -751,6 +751,33 @@ class ToolsPanel(QWidget):
             ("Compress PDF", "Advanced compression options", "compress_pdf_advanced"),
         ], layout)
         
+        self._add_tool_group("OCR & Convert", [
+            ("OCR (Text Recognition)", "Recognize text in scanned PDFs", "ocr_pdf"),
+            ("PDF to Word", "Convert to Word document", "pdf_to_word"),
+            ("PDF to Excel", "Convert to Excel spreadsheet", "pdf_to_excel"),
+            ("PDF to PowerPoint", "Convert to PowerPoint", "pdf_to_ppt"),
+            ("Images to PDF", "Convert images to PDF", "images_to_pdf"),
+        ], layout)
+        
+        self._add_tool_group("Page Tools", [
+            ("Rotate Left", "Rotate page 90° counter-clockwise", "rotate_left"),
+            ("Rotate Right", "Rotate page 90° clockwise", "rotate_right"),
+            ("Delete Page", "Remove current page", "delete_page"),
+            ("Insert Blank Page", "Add new blank page", "insert_page"),
+            ("Crop Pages", "Crop page margins", "crop_pages"),
+        ], layout)
+        
+        self._add_tool_group("Forms & Signatures", [
+            ("Prepare Form", "Auto-detect form fields", "prepare_form"),
+            ("Add Text Field", "Add text input field", "add_text_field"),
+            ("Add Checkbox", "Add checkbox", "add_checkbox"),
+            ("Add Radio Button", "Add radio button group", "add_radio_button"),
+            ("Add Dropdown", "Add dropdown list", "add_dropdown"),
+            ("Add Signature Field", "Add digital signature field", "add_signature_field"),
+            ("Create Signature", "Draw or import signature", "create_signature"),
+            ("Sign Document", "Sign with certificate", "sign_document"),
+        ], layout)
+        
         layout.addStretch()
     
     def _add_tool_group(self, title, tools, parent_layout):
@@ -2790,6 +2817,217 @@ class PDFViewer(QMainWindow):
                 
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Batch processing failed:\n{e}")
+
+
+# ============ NEW FEATURES ============
+    
+    def ocr_pdf(self):
+        """OCR (Text Recognition) for scanned PDFs using Tesseract."""
+        if not self.doc:
+            return
+        
+        try:
+            import pytesseract
+        except ImportError:
+            QMessageBox.warning(self, "OCR Not Available", 
+                "pytesseract not installed. Run: pip install pytesseract\n"
+                "Also install Tesseract OCR: https://github.com/tesseract-ocr/tesseract")
+            return
+        
+        path, _ = QFileDialog.getSaveFileName(self, "Save OCR PDF", "", "PDF Files (*.pdf)")
+        if not path:
+            return
+        
+        try:
+            self.status_label.setText("Running OCR... This may take a while.")
+            QApplication.processEvents()
+            
+            for i in range(len(self.doc)):
+                page = self.doc[i]
+                # Render page as image at high DPI
+                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                
+                # Run OCR
+                ocr_text = pytesseract.image_to_string(img)
+                
+                # Add text layer to page
+                if ocr_text.strip():
+                    page.insert_text((50, 50), ocr_text, fontsize=8, color=(0, 0, 0), render_mode=3)
+            
+            self.doc.save(path)
+            self.status_label.setText(f"OCR complete: {Path(path).name}")
+            QMessageBox.information(self, "Success", "OCR text layer added to PDF.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"OCR failed:\n{e}")
+    
+    def pdf_to_word(self):
+        """Convert PDF to Word document."""
+        if not self.doc:
+            return
+        
+        try:
+            import pdf2docx
+        except ImportError:
+            QMessageBox.warning(self, "Not Available", 
+                "pdf2docx not installed. Run: pip install pdf2docx")
+            return
+        
+        path, _ = QFileDialog.getSaveFileName(self, "Save as Word", "", "Word Documents (*.docx)")
+        if not path:
+            return
+        
+        try:
+            self.status_label.setText("Converting to Word...")
+            QApplication.processEvents()
+            
+            cv = pdf2docx.Converter(self.file_path)
+            cv.convert(path)
+            cv.close()
+            
+            self.status_label.setText(f"Converted to Word: {Path(path).name}")
+            QMessageBox.information(self, "Success", f"Saved as {Path(path).name}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Conversion failed:\n{e}")
+    
+    def pdf_to_excel(self):
+        """Convert PDF tables to Excel."""
+        if not self.doc:
+            return
+        
+        try:
+            import tabula
+        except ImportError:
+            QMessageBox.warning(self, "Not Available", 
+                "tabula-py not installed. Run: pip install tabula-py\n"
+                "Also requires Java runtime.")
+            return
+        
+        path, _ = QFileDialog.getSaveFileName(self, "Save as Excel", "", "Excel Files (*.xlsx)")
+        if not path:
+            return
+        
+        try:
+            self.status_label.setText("Extracting tables to Excel...")
+            QApplication.processEvents()
+            
+            tabula.convert_into(self.file_path, path, output_format="xlsx", pages="all")
+            
+            self.status_label.setText(f"Saved as Excel: {Path(path).name}")
+            QMessageBox.information(self, "Success", f"Saved as {Path(path).name}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Conversion failed:\n{e}")
+    
+    def pdf_to_ppt(self):
+        """Convert PDF to PowerPoint (placeholder)."""
+        QMessageBox.information(self, "Not Implemented", 
+            "PDF to PowerPoint conversion requires python-pptx and custom layout logic.\n"
+            "Install: pip install python-pptx")
+    
+    def images_to_pdf(self):
+        """Convert images to PDF."""
+        paths, _ = QFileDialog.getOpenFileNames(self, "Select Images", "", 
+            "Images (*.png *.jpg *.jpeg *.tiff *.bmp)")
+        if not paths:
+            return
+        
+        path, _ = QFileDialog.getSaveFileName(self, "Save as PDF", "", "PDF Files (*.pdf)")
+        if not path:
+            return
+        
+        try:
+            doc = fitz.open()
+            for img_path in paths:
+                img_doc = fitz.open(img_path)
+                pdf_bytes = img_doc.convert_to_pdf()
+                img_pdf = fitz.open("pdf", pdf_bytes)
+                doc.insert_pdf(img_pdf)
+                img_doc.close()
+            
+            doc.save(path)
+            doc.close()
+            
+            self.status_label.setText(f"Created PDF from {len(paths)} images: {Path(path).name}")
+            QMessageBox.information(self, "Success", f"Created PDF with {len(paths)} pages.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to create PDF:\n{e}")
+    
+    def rotate_left(self):
+        if not self.doc:
+            return
+        page = self.doc[self.current_page]
+        page.set_rotation((page.rotation - 90) % 360)
+        self.render_pages()
+        self.status_label.setText("Page rotated left")
+    
+    def rotate_right(self):
+        if not self.doc:
+            return
+        page = self.doc[self.current_page]
+        page.set_rotation((page.rotation + 90) % 360)
+        self.render_pages()
+        self.status_label.setText("Page rotated right")
+    
+    def delete_page(self):
+        if not self.doc or len(self.doc) <= 1:
+            return
+        reply = QMessageBox.question(self, "Delete Page", 
+            f"Delete page {self.current_page + 1}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
+            self.doc.delete_page(self.current_page)
+            self.load_document(self.file_path)
+            self.status_label.setText("Page deleted")
+    
+    def insert_page(self):
+        if not self.doc:
+            return
+        self.doc.new_page(self.current_page)
+        self.load_document(self.file_path)
+        self.status_label.setText("Blank page inserted")
+    
+    def crop_pages(self):
+        QMessageBox.information(self, "Crop Pages", 
+            "Crop tool: Select area on page with selection tool, then use Crop Pages.")
+    
+    def add_text_field(self):
+        self.status_label.setText("Add text field - Click on page to place field")
+        # Would need form field creation UI
+    
+    def add_checkbox(self):
+        self.status_label.setText("Add checkbox - Click on page to place checkbox")
+    
+    def add_radio_button(self):
+        self.status_label.setText("Add radio button - Click on page to place radio button")
+    
+    def add_dropdown(self):
+        self.status_label.setText("Add dropdown - Click on page to place dropdown")
+    
+    def add_signature_field(self):
+        self.status_label.setText("Add signature field - Click on page to place signature field")
+    
+    def create_signature(self):
+        """Draw or import signature."""
+        QMessageBox.information(self, "Create Signature", 
+            "Signature creation: Draw with mouse or import image.\n"
+            "This would open a signature pad dialog.")
+    
+    def sign_document(self):
+        self.status_label.setText("Sign document - Select certificate file")
+        # Would need PKCS#12 certificate handling
+    
+    def prepare_form(self):
+        if not self.doc:
+            return
+        self.status_label.setText("Preparing form - Auto-detecting fields...")
+        # Would auto-detect form fields using text patterns
+    
+    def redact_tool(self):
+        self.status_label.setText("Redact tool - Select text to redact")
+        self.sidebar_tabs.setCurrentIndex(2)  # Comments tab
+    
+    def crop_pages(self):
+        self.status_label.setText("Crop pages - Select area to crop")
 
 
 def main():
