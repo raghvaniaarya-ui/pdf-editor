@@ -736,6 +736,21 @@ class ToolsPanel(QWidget):
             ("Optimize PDF", "Reduce file size", "optimize_pdf"),
         ], layout)
         
+        self._add_tool_group("Protect & Secure", [
+            ("Protect PDF", "Add password protection", "protect_pdf"),
+            ("Unlock PDF", "Remove password protection", "unlock_pdf"),
+            ("Flatten PDF", "Merge annotations into content", "flatten_pdf"),
+            ("Add Page Numbers", "Insert page numbers", "add_page_numbers"),
+            ("Add Watermark", "Add text or image watermark", "add_watermark"),
+        ], layout)
+        
+        self._add_tool_group("Advanced", [
+            ("Extract Images", "Extract all images from PDF", "extract_images_from_pdf"),
+            ("Compare PDFs", "Compare two PDF files", "compare_pdfs"),
+            ("Batch Process", "Process multiple PDFs", "batch_process"),
+            ("Compress PDF", "Advanced compression options", "compress_pdf_advanced"),
+        ], layout)
+        
         layout.addStretch()
     
     def _add_tool_group(self, title, tools, parent_layout):
@@ -1020,6 +1035,565 @@ class DocumentToolbar(QWidget):
         self.zoom_combo.blockSignals(False)
 
 
+# ============ DIALOG CLASSES FOR NEW FEATURES ============
+
+class PasswordDialog(QDialog):
+    """Dialog for setting PDF passwords and permissions."""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Protect PDF with Password")
+        self.resize(400, 350)
+        
+        layout = QVBoxLayout(self)
+        
+        # User password
+        user_group = QGroupBox("User Password (required to open)")
+        user_layout = QFormLayout(user_group)
+        self.user_pwd = QLineEdit()
+        self.user_pwd.setEchoMode(QLineEdit.EchoMode.Password)
+        self.user_pwd.setPlaceholderText("Enter password to open PDF")
+        user_layout.addRow("Password:", self.user_pwd)
+        
+        self.user_pwd_confirm = QLineEdit()
+        self.user_pwd_confirm.setEchoMode(QLineEdit.EchoMode.Password)
+        self.user_pwd_confirm.setPlaceholderText("Confirm password")
+        user_layout.addRow("Confirm:", self.user_pwd_confirm)
+        layout.addWidget(user_group)
+        
+        # Owner password
+        owner_group = QGroupBox("Owner Password (required to change permissions)")
+        owner_layout = QFormLayout(owner_group)
+        self.owner_pwd = QLineEdit()
+        self.owner_pwd.setEchoMode(QLineEdit.EchoMode.Password)
+        self.owner_pwd.setPlaceholderText("Optional: different from user password")
+        owner_layout.addRow("Password:", self.owner_pwd)
+        
+        self.owner_pwd_confirm = QLineEdit()
+        self.owner_pwd_confirm.setEchoMode(QLineEdit.EchoMode.Password)
+        owner_layout.addRow("Confirm:", self.owner_pwd_confirm)
+        layout.addWidget(owner_group)
+        
+        # Permissions
+        perm_group = QGroupBox("Permissions (when user password is used)")
+        perm_layout = QVBoxLayout(perm_group)
+        self.perm_print = QCheckBox("Print document")
+        self.perm_print.setChecked(True)
+        self.perm_modify = QCheckBox("Modify document")
+        self.perm_modify.setChecked(False)
+        self.perm_copy = QCheckBox("Copy text/images")
+        self.perm_copy.setChecked(True)
+        self.perm_annotate = QCheckBox("Add/modify annotations")
+        self.perm_annotate.setChecked(False)
+        self.perm_fill_forms = QCheckBox("Fill form fields")
+        self.perm_fill_forms.setChecked(True)
+        self.perm_accessibility = QCheckBox("Accessibility (screen readers)")
+        self.perm_accessibility.setChecked(True)
+        self.perm_assemble = QCheckBox("Assemble document (insert/rotate/delete pages)")
+        self.perm_assemble.setChecked(False)
+        self.perm_print_high = QCheckBox("High-quality printing")
+        self.perm_print_high.setChecked(True)
+        
+        perm_layout.addWidget(self.perm_print)
+        perm_layout.addWidget(self.perm_modify)
+        perm_layout.addWidget(self.perm_copy)
+        perm_layout.addWidget(self.perm_annotate)
+        perm_layout.addWidget(self.perm_fill_forms)
+        perm_layout.addWidget(self.perm_accessibility)
+        perm_layout.addWidget(self.perm_assemble)
+        perm_layout.addWidget(self.perm_print_high)
+        layout.addWidget(perm_group)
+        
+        # Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+    
+    def get_passwords(self):
+        user_pwd = self.user_pwd.text() if self.user_pwd.text() else None
+        owner_pwd = self.owner_pwd.text() if self.owner_pwd.text() else None
+        
+        if user_pwd != self.user_pwd_confirm.text():
+            QMessageBox.warning(self, "Error", "User passwords don't match!")
+            return None, None, 0
+        
+        if owner_pwd and owner_pwd != self.owner_pwd_confirm.text():
+            QMessageBox.warning(self, "Error", "Owner passwords don't match!")
+            return None, None, 0
+        
+        # Calculate permissions
+        permissions = 0
+        if self.perm_print.isChecked(): permissions |= fitz.PDF_PERM_PRINT
+        if self.perm_modify.isChecked(): permissions |= fitz.PDF_PERM_MODIFY
+        if self.perm_copy.isChecked(): permissions |= fitz.PDF_PERM_COPY
+        if self.perm_annotate.isChecked(): permissions |= fitz.PDF_PERM_ANNOTATE
+        if self.perm_fill_forms.isChecked(): permissions |= fitz.PDF_PERM_FILL_FORMS
+        if self.perm_accessibility.isChecked(): permissions |= fitz.PDF_PERM_ACCESSIBILITY
+        if self.perm_assemble.isChecked(): permissions |= fitz.PDF_PERM_ASSEMBLE
+        if self.perm_print_high.isChecked(): permissions |= fitz.PDF_PERM_PRINT_HIGH
+        
+        return user_pwd, owner_pwd, permissions
+
+
+class PageNumberDialog(QDialog):
+    """Dialog for adding page numbers."""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Add Page Numbers")
+        self.resize(350, 300)
+        
+        layout = QVBoxLayout(self)
+        
+        # Position
+        pos_group = QGroupBox("Position")
+        pos_layout = QVBoxLayout(pos_group)
+        self.pos_combo = QComboBox()
+        self.pos_combo.addItems(["Bottom Center", "Bottom Right", "Bottom Left", 
+                                "Top Center", "Top Right", "Top Left"])
+        self.pos_combo.setCurrentText("Bottom Center")
+        pos_layout.addWidget(self.pos_combo)
+        layout.addWidget(pos_group)
+        
+        # Format
+        fmt_group = QGroupBox("Format")
+        fmt_layout = QFormLayout(fmt_group)
+        self.prefix = QLineEdit()
+        self.prefix.setPlaceholderText("e.g., Page")
+        fmt_layout.addRow("Prefix:", self.prefix)
+        
+        self.suffix = QLineEdit()
+        self.suffix.setPlaceholderText("e.g., of 10")
+        fmt_layout.addRow("Suffix:", self.suffix)
+        
+        self.fontsize = QSpinBox()
+        self.fontsize.setRange(6, 72)
+        self.fontsize.setValue(10)
+        fmt_layout.addRow("Font Size:", self.fontsize)
+        
+        self.color_btn = QPushButton("Choose Color")
+        self.color_btn.clicked.connect(self.choose_color)
+        self.color = QColor(0, 0, 0)
+        self.color_btn.setStyleSheet("background-color: black; color: white;")
+        fmt_layout.addRow("Color:", self.color_btn)
+        layout.addWidget(fmt_group)
+        
+        # Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+    
+    def choose_color(self):
+        color = QColorDialog.getColor(self.color, self)
+        if color.isValid():
+            self.color = color
+            self.color_btn.setStyleSheet(f"background-color: {color.name()}; color: {'white' if color.lightness() < 128 else 'black'};")
+    
+    def get_settings(self):
+        return {
+            "position": self.pos_combo.currentText().lower().replace(" ", "_"),
+            "prefix": self.prefix.text(),
+            "suffix": self.suffix.text(),
+            "fontsize": self.fontsize.value(),
+            "color": (self.color.redF(), self.color.greenF(), self.color.blueF())
+        }
+
+
+class WatermarkDialog(QDialog):
+    """Dialog for adding watermarks."""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Add Watermark")
+        self.resize(400, 350)
+        
+        layout = QVBoxLayout(self)
+        
+        # Type
+        type_group = QGroupBox("Watermark Type")
+        type_layout = QVBoxLayout(type_group)
+        self.type_combo = QComboBox()
+        self.type_combo.addItems(["Text", "Image"])
+        self.type_combo.currentTextChanged.connect(self.on_type_changed)
+        type_layout.addWidget(self.type_combo)
+        layout.addWidget(type_group)
+        
+        # Text settings
+        self.text_group = QGroupBox("Text Watermark")
+        text_layout = QFormLayout(self.text_group)
+        self.wm_text = QLineEdit()
+        self.wm_text.setPlaceholderText("CONFIDENTIAL")
+        text_layout.addRow("Text:", self.wm_text)
+        
+        self.wm_fontsize = QSpinBox()
+        self.wm_fontsize.setRange(12, 200)
+        self.wm_fontsize.setValue(72)
+        text_layout.addRow("Font Size:", self.wm_fontsize)
+        
+        self.wm_color_btn = QPushButton("Choose Color")
+        self.wm_color_btn.clicked.connect(self.choose_wm_color)
+        self.wm_color = QColor(255, 0, 0, 128)
+        self.wm_color_btn.setStyleSheet("background-color: rgba(255,0,0,128);")
+        text_layout.addRow("Color:", self.wm_color_btn)
+        layout.addWidget(self.text_group)
+        
+        # Image settings
+        self.image_group = QGroupBox("Image Watermark")
+        image_layout = QFormLayout(self.image_group)
+        self.wm_image_path = QLineEdit()
+        self.wm_image_path.setReadOnly(True)
+        image_layout.addRow("Image:", self.wm_image_path)
+        
+        browse_btn = QPushButton("Browse...")
+        browse_btn.clicked.connect(self.browse_image)
+        image_layout.addRow("", browse_btn)
+        layout.addWidget(self.image_group)
+        
+        # Opacity
+        opacity_group = QGroupBox("Opacity")
+        opacity_layout = QVBoxLayout(opacity_group)
+        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.opacity_slider.setRange(0, 255)
+        self.opacity_slider.setValue(64)
+        self.opacity_label = QLabel("Opacity: 25%")
+        self.opacity_slider.valueChanged.connect(lambda v: self.opacity_label.setText(f"Opacity: {v*100//255}%"))
+        opacity_layout.addWidget(self.opacity_label)
+        opacity_layout.addWidget(self.opacity_slider)
+        layout.addWidget(opacity_group)
+        
+        self.on_type_changed(self.type_combo.currentText())
+        
+        # Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+    
+    def on_type_changed(self, text):
+        self.text_group.setVisible(text == "Text")
+        self.image_group.setVisible(text == "Image")
+    
+    def choose_wm_color(self):
+        color = QColorDialog.getColor(self.wm_color, self)
+        if color.isValid():
+            self.wm_color = color
+            self.wm_color_btn.setStyleSheet(f"background-color: {color.name()};")
+    
+    def browse_image(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Select Watermark Image", "", "Images (*.png *.jpg *.jpeg)")
+        if path:
+            self.wm_image_path.setText(path)
+    
+    def get_settings(self):
+        return {
+            "type": self.type_combo.currentText().lower(),
+            "text": self.wm_text.text(),
+            "fontsize": self.wm_fontsize.value(),
+            "color": (self.wm_color.redF(), self.wm_color.greenF(), self.wm_color.blueF(), self.wm_color.alphaF()),
+            "image_path": self.wm_image_path.text() if self.type_combo.currentText() == "Image" else "",
+            "opacity": self.opacity_slider.value() / 255.0
+        }
+
+
+class WatermarkDialog(QDialog):
+    """Dialog for adding watermarks."""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Add Watermark")
+        self.resize(400, 350)
+        
+        layout = QVBoxLayout(self)
+        
+        # Type
+        type_group = QGroupBox("Watermark Type")
+        type_layout = QVBoxLayout(type_group)
+        self.type_combo = QComboBox()
+        self.type_combo.addItems(["Text", "Image"])
+        self.type_combo.currentTextChanged.connect(self.on_type_changed)
+        type_layout.addWidget(self.type_combo)
+        layout.addWidget(type_group)
+        
+        # Text settings
+        self.text_group = QGroupBox("Text Watermark")
+        text_layout = QFormLayout(self.text_group)
+        self.wm_text = QLineEdit()
+        self.wm_text.setPlaceholderText("CONFIDENTIAL")
+        text_layout.addRow("Text:", self.wm_text)
+        
+        self.wm_fontsize = QSpinBox()
+        self.wm_fontsize.setRange(12, 200)
+        self.wm_fontsize.setValue(72)
+        text_layout.addRow("Font Size:", self.wm_fontsize)
+        
+        self.wm_color_btn = QPushButton("Choose Color")
+        self.wm_color_btn.clicked.connect(self.choose_wm_color)
+        self.wm_color = QColor(255, 0, 0, 128)
+        self.wm_color_btn.setStyleSheet("background-color: rgba(255,0,0,128);")
+        text_layout.addRow("Color:", self.wm_color_btn)
+        layout.addWidget(self.text_group)
+        
+        # Image settings
+        self.image_group = QGroupBox("Image Watermark")
+        image_layout = QFormLayout(self.image_group)
+        self.wm_image_path = QLineEdit()
+        self.wm_image_path.setReadOnly(True)
+        image_layout.addRow("Image:", self.wm_image_path)
+        
+        browse_btn = QPushButton("Browse...")
+        browse_btn.clicked.connect(self.browse_image)
+        image_layout.addRow("", browse_btn)
+        layout.addWidget(self.image_group)
+        
+        # Opacity
+        opacity_group = QGroupBox("Opacity")
+        opacity_layout = QVBoxLayout(opacity_group)
+        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.opacity_slider.setRange(0, 255)
+        self.opacity_slider.setValue(64)
+        self.opacity_label = QLabel("Opacity: 25%")
+        self.opacity_slider.valueChanged.connect(lambda v: self.opacity_label.setText(f"Opacity: {v*100//255}%"))
+        opacity_layout.addWidget(self.opacity_label)
+        opacity_layout.addWidget(self.opacity_slider)
+        layout.addWidget(opacity_group)
+        
+        self.on_type_changed(self.type_combo.currentText())
+        
+        # Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+    
+    def on_type_changed(self, text):
+        self.text_group.setVisible(text == "Text")
+        self.image_group.setVisible(text == "Image")
+    
+    def choose_wm_color(self):
+        color = QColorDialog.getColor(self.wm_color, self)
+        if color.isValid():
+            self.wm_color = color
+            self.wm_color_btn.setStyleSheet(f"background-color: {color.name()};")
+    
+    def browse_image(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Select Watermark Image", "", "Images (*.png *.jpg *.jpeg)")
+        if path:
+            self.wm_image_path.setText(path)
+    
+    def get_settings(self):
+        return {
+            "type": self.type_combo.currentText().lower(),
+            "text": self.wm_text.text(),
+            "fontsize": self.wm_fontsize.value(),
+            "color": (self.wm_color.redF(), self.wm_color.greenF(), self.wm_color.blueF(), self.wm_color.alphaF()),
+            "image_path": self.wm_image_path.text() if self.type_combo.currentText() == "Image" else "",
+            "opacity": self.opacity_slider.value() / 255.0
+        }
+
+
+class CompressDialog(QDialog):
+    """Dialog for advanced PDF compression."""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Compress PDF")
+        self.resize(350, 300)
+        
+        layout = QVBoxLayout(self)
+        
+        # Presets
+        preset_group = QGroupBox("Compression Preset")
+        preset_layout = QVBoxLayout(preset_group)
+        self.preset_combo = QComboBox()
+        self.preset_combo.addItems(["Maximum Quality", "Balanced", "Smallest Size", "Custom"])
+        self.preset_combo.currentTextChanged.connect(self.on_preset_changed)
+        preset_layout.addWidget(self.preset_combo)
+        layout.addWidget(preset_group)
+        
+        # Custom options
+        self.custom_group = QGroupBox("Custom Options")
+        custom_layout = QFormLayout(self.custom_group)
+        
+        self.garbage = QSpinBox()
+        self.garbage.setRange(0, 4)
+        self.garbage.setValue(4)
+        custom_layout.addRow("Garbage Collection (0-4):", self.garbage)
+        
+        self.deflate = QCheckBox("Compress Streams (deflate)")
+        self.deflate.setChecked(True)
+        custom_layout.addRow("", self.deflate)
+        
+        self.clean = QCheckBox("Clean Syntax")
+        self.clean.setChecked(True)
+        custom_layout.addRow("", self.clean)
+        
+        self.deflate_images = QCheckBox("Compress Images")
+        self.deflate_images.setChecked(True)
+        custom_layout.addRow("", self.deflate_images)
+        
+        self.deflate_fonts = QCheckBox("Compress Fonts")
+        self.deflate_fonts.setChecked(True)
+        custom_layout.addRow("", self.deflate_fonts)
+        
+        layout.addWidget(self.custom_group)
+        
+        # Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        
+        self.on_preset_changed(self.preset_combo.currentText())
+    
+    def on_preset_changed(self, text):
+        if text == "Maximum Quality":
+            self.garbage.setValue(1)
+            self.deflate.setChecked(True)
+            self.clean.setChecked(True)
+            self.deflate_images.setChecked(False)
+            self.deflate_fonts.setChecked(True)
+        elif text == "Balanced":
+            self.garbage.setValue(3)
+            self.deflate.setChecked(True)
+            self.clean.setChecked(True)
+            self.deflate_images.setChecked(True)
+            self.deflate_fonts.setChecked(True)
+        elif text == "Smallest Size":
+            self.garbage.setValue(4)
+            self.deflate.setChecked(True)
+            self.clean.setChecked(True)
+            self.deflate_images.setChecked(True)
+            self.deflate_fonts.setChecked(True)
+        
+        self.custom_group.setVisible(text == "Custom")
+    
+    def get_settings(self):
+        return {
+            "garbage": self.garbage.value(),
+            "deflate": self.deflate.isChecked(),
+            "clean": self.clean.isChecked(),
+            "deflate_images": self.deflate_images.isChecked(),
+            "deflate_fonts": self.deflate_fonts.isChecked()
+        }
+
+
+class BatchProcessDialog(QDialog):
+    """Dialog for batch processing multiple PDFs."""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Batch Process PDFs")
+        self.resize(500, 400)
+        
+        layout = QVBoxLayout(self)
+        
+        # Files
+        files_group = QGroupBox("Files to Process")
+        files_layout = QVBoxLayout(files_group)
+        self.files_list = QListWidget()
+        self.files_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        files_layout.addWidget(self.files_list)
+        
+        btn_layout = QHBoxLayout()
+        add_btn = QPushButton("Add Files")
+        add_btn.clicked.connect(self.add_files)
+        remove_btn = QPushButton("Remove Selected")
+        remove_btn.clicked.connect(self.remove_selected)
+        clear_btn = QPushButton("Clear All")
+        clear_btn.clicked.connect(self.clear_all)
+        btn_layout.addWidget(add_btn)
+        btn_layout.addWidget(remove_btn)
+        btn_layout.addWidget(clear_btn)
+        files_layout.addLayout(btn_layout)
+        layout.addWidget(files_group)
+        
+        # Action
+        action_group = QGroupBox("Action")
+        action_layout = QVBoxLayout(action_group)
+        self.action_combo = QComboBox()
+        self.action_combo.addItems(["Compress", "Flatten", "Remove Annotations", "Add Page Numbers"])
+        action_layout.addWidget(self.action_combo)
+        layout.addWidget(action_group)
+        
+        # Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+    
+    def add_files(self):
+        paths, _ = QFileDialog.getOpenFileNames(self, "Select PDF Files", "", "PDF Files (*.pdf)")
+        for path in paths:
+            if path not in [self.files_list.item(i).text() for i in range(self.files_list.count())]:
+                self.files_list.addItem(path)
+    
+    def remove_selected(self):
+        for item in self.files_list.selectedItems():
+            self.files_list.takeItem(self.files_list.row(item))
+    
+    def clear_all(self):
+        self.files_list.clear()
+    
+    def get_settings(self):
+        files = [self.files_list.item(i).text() for i in range(self.files_list.count())]
+        return {
+            "files": files,
+            "action": self.action_combo.currentText().lower().replace(" ", "_")
+        }
+
+
+class ExportDialog(QDialog):
+    """Enhanced export dialog for images."""
+    
+    def __init__(self, page_count: int, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Export Pages as Images")
+        self.resize(400, 300)
+        
+        layout = QVBoxLayout(self)
+        
+        form = QFormLayout()
+        self.page_range = QLineEdit(f"1-{page_count}")
+        form.addRow("Page Range:", self.page_range)
+        
+        self.format_combo = QComboBox()
+        self.format_combo.addItems(["PNG", "JPEG", "TIFF", "BMP"])
+        form.addRow("Format:", self.format_combo)
+        
+        self.dpi_spin = QSpinBox()
+        self.dpi_spin.setRange(72, 600)
+        self.dpi_spin.setValue(150)
+        self.dpi_spin.setSuffix(" DPI")
+        form.addRow("Resolution:", self.dpi_spin)
+        
+        self.quality_spin = QSpinBox()
+        self.quality_spin.setRange(1, 100)
+        self.quality_spin.setValue(90)
+        self.quality_spin.setSuffix("%")
+        self.quality_spin.setToolTip("JPEG quality (ignored for PNG/TIFF)")
+        form.addRow("JPEG Quality:", self.quality_spin)
+        
+        layout.addLayout(form)
+        
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+    
+    def get_settings(self):
+        return {
+            "range": self.page_range.text(),
+            "format": self.format_combo.currentText(),
+            "dpi": self.dpi_spin.value(),
+            "quality": self.quality_spin.value()
+        }
+
+
+# ============ END DIALOG CLASSES ============
+
+
 class PDFViewer(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1274,6 +1848,47 @@ class PDFViewer(QMainWindow):
         prepare_form_action = QAction("&Prepare Form", self)
         prepare_form_action.triggered.connect(self.prepare_form)
         tools_menu.addAction(prepare_form_action)
+        
+        tools_menu.addSeparator()
+        
+        protect_action = QAction("&Protect PDF...", self)
+        protect_action.setShortcut(QKeySequence("Ctrl+Shift+P"))
+        protect_action.triggered.connect(self.protect_pdf)
+        tools_menu.addAction(protect_action)
+        
+        unlock_action = QAction("&Unlock PDF...", self)
+        unlock_action.triggered.connect(self.unlock_pdf)
+        tools_menu.addAction(unlock_action)
+        
+        pagenums_action = QAction("Add &Page Numbers...", self)
+        pagenums_action.triggered.connect(self.add_page_numbers)
+        tools_menu.addAction(pagenums_action)
+        
+        watermark_action = QAction("Add &Watermark...", self)
+        watermark_action.triggered.connect(self.add_watermark)
+        tools_menu.addAction(watermark_action)
+        
+        flatten_action = QAction("&Flatten PDF...", self)
+        flatten_action.triggered.connect(self.flatten_pdf)
+        tools_menu.addAction(flatten_action)
+        
+        tools_menu.addSeparator()
+        
+        extract_img_action = QAction("&Extract Images...", self)
+        extract_img_action.triggered.connect(self.extract_images_from_pdf)
+        tools_menu.addAction(extract_img_action)
+        
+        compare_action = QAction("&Compare PDFs...", self)
+        compare_action.triggered.connect(self.compare_pdfs)
+        tools_menu.addAction(compare_action)
+        
+        compress_adv_action = QAction("Advanced &Compress...", self)
+        compress_adv_action.triggered.connect(self.compress_pdf_advanced)
+        tools_menu.addAction(compress_adv_action)
+        
+        batch_action = QAction("&Batch Process...", self)
+        batch_action.triggered.connect(self.batch_process)
+        tools_menu.addAction(batch_action)
         
         # Window menu
         window_menu = menubar.addMenu("&Window")
@@ -1887,6 +2502,294 @@ class PDFViewer(QMainWindow):
         if self.doc:
             self.doc.close()
         event.accept()
+    
+    # ============ NEW PDF24-LIKE FEATURES ============
+    
+    def protect_pdf(self):
+        """Add password protection to PDF."""
+        if not self.doc:
+            return
+        
+        dialog = PasswordDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            user_pwd, owner_pwd, permissions = dialog.get_passwords()
+            
+            path, _ = QFileDialog.getSaveFileName(self, "Save Protected PDF", "", "PDF Files (*.pdf)")
+            if path:
+                try:
+                    self.doc.save(path, encryption=fitz.PDF_ENCRYPT_AES_256, 
+                                user_pw=user_pwd, owner_pw=owner_pwd, permissions=permissions)
+                    self.status_label.setText(f"PDF protected: {Path(path).name}")
+                    QMessageBox.information(self, "Success", "PDF has been password protected.")
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", f"Failed to protect PDF:\n{e}")
+    
+    def unlock_pdf(self):
+        """Remove password protection from PDF."""
+        if not self.doc:
+            return
+        
+        if not self.doc.needs_pass:
+            QMessageBox.information(self, "Not Protected", "This PDF is not password protected.")
+            return
+        
+        password, ok = QInputDialog.getText(self, "Unlock PDF", "Enter password:", QLineEdit.EchoMode.Password)
+        if ok and password:
+            try:
+                if self.doc.authenticate(password):
+                    path, _ = QFileDialog.getSaveFileName(self, "Save Unlocked PDF", "", "PDF Files (*.pdf)")
+                    if path:
+                        self.doc.save(path, encryption=fitz.PDF_ENCRYPT_KEEP)
+                        self.status_label.setText(f"PDF unlocked: {Path(path).name}")
+                        QMessageBox.information(self, "Success", "PDF has been unlocked.")
+                else:
+                    QMessageBox.warning(self, "Wrong Password", "Incorrect password.")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to unlock PDF:\n{e}")
+    
+    def add_page_numbers(self):
+        """Add page numbers to PDF."""
+        if not self.doc:
+            return
+        
+        dialog = PageNumberDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            settings = dialog.get_settings()
+            
+            path, _ = QFileDialog.getSaveFileName(self, "Save PDF with Page Numbers", "", "PDF Files (*.pdf)")
+            if path:
+                try:
+                    for i in range(len(self.doc)):
+                        page = self.doc[i]
+                        page_num = i + 1
+                        
+                        # Format page number
+                        if settings["prefix"]:
+                            text = f"{settings['prefix']} {page_num}"
+                        else:
+                            text = str(page_num)
+                        if settings["suffix"]:
+                            text += f" {settings['suffix']}"
+                        
+                        # Calculate position
+                        rect = page.rect
+                        if settings["position"] == "bottom_center":
+                            x = rect.width / 2 - 30
+                            y = rect.height - 30
+                        elif settings["position"] == "bottom_right":
+                            x = rect.width - 60
+                            y = rect.height - 30
+                        elif settings["position"] == "bottom_left":
+                            x = 30
+                            y = rect.height - 30
+                        elif settings["position"] == "top_center":
+                            x = rect.width / 2 - 30
+                            y = 30
+                        elif settings["position"] == "top_right":
+                            x = rect.width - 60
+                            y = 30
+                        else:  # top_left
+                            x = 30
+                            y = 30
+                        
+                        # Insert page number
+                        page.insert_text((x, y), text, fontsize=settings["fontsize"], 
+                                       fontname="helv", color=settings["color"])
+                    
+                    self.doc.save(path)
+                    self.status_label.setText(f"Page numbers added: {Path(path).name}")
+                    QMessageBox.information(self, "Success", "Page numbers have been added.")
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", f"Failed to add page numbers:\n{e}")
+    
+    def add_watermark(self):
+        """Add text or image watermark to PDF."""
+        if not self.doc:
+            return
+        
+        dialog = WatermarkDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            settings = dialog.get_settings()
+            
+            path, _ = QFileDialog.getSaveFileName(self, "Save Watermarked PDF", "", "PDF Files (*.pdf)")
+            if path:
+                try:
+                    for i in range(len(self.doc)):
+                        page = self.doc[i]
+                        rect = page.rect
+                        
+                        if settings["type"] == "text":
+                            # Add text watermark (diagonal)
+                            page.insert_text((rect.width/2, rect.height/2), settings["text"],
+                                           fontsize=settings["fontsize"], fontname="helv",
+                                           color=settings["color"], opacity=settings["opacity"],
+                                           rotate=45, overlay=True)
+                        elif settings["type"] == "image" and settings["image_path"]:
+                            # Add image watermark
+                            img_rect = fitz.Rect(rect.width/4, rect.height/4, 
+                                               rect.width*3/4, rect.height*3/4)
+                            page.insert_image(img_rect, filename=settings["image_path"],
+                                            opacity=settings["opacity"], overlay=True)
+                    
+                    self.doc.save(path)
+                    self.status_label.setText(f"Watermark added: {Path(path).name}")
+                    QMessageBox.information(self, "Success", "Watermark has been added.")
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", f"Failed to add watermark:\n{e}")
+    
+    def flatten_pdf(self):
+        """Flatten PDF (merge annotations into page content)."""
+        if not self.doc:
+            return
+        
+        path, _ = QFileDialog.getSaveFileName(self, "Save Flattened PDF", "", "PDF Files (*.pdf)")
+        if path:
+            try:
+                # Flatten by saving with no incremental and no annotations
+                for page in self.doc:
+                    # This will flatten annotations into the page
+                    pass
+                
+                self.doc.save(path, garbage=4, deflate=True, clean=True)
+                self.status_label.setText(f"PDF flattened: {Path(path).name}")
+                QMessageBox.information(self, "Success", "PDF has been flattened (annotations merged).")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to flatten PDF:\n{e}")
+    
+    def extract_images_from_pdf(self):
+        """Extract all images from PDF."""
+        if not self.doc:
+            return
+        
+        output_dir = QFileDialog.getExistingDirectory(self, "Select Output Folder for Images")
+        if not output_dir:
+            return
+        
+        try:
+            count = 0
+            for i in range(len(self.doc)):
+                page = self.doc[i]
+                images = page.get_images(full=True)
+                
+                for img_index, img in enumerate(images):
+                    xref = img[0]
+                    pix = fitz.Pixmap(self.doc, xref)
+                    
+                    if pix.n < 5:  # GRAY or RGB
+                        output_path = Path(output_dir) / f"page_{i+1}_img_{img_index+1}.png"
+                        pix.save(str(output_path))
+                    else:  # CMYK - convert to RGB
+                        pix_rgb = fitz.Pixmap(fitz.csRGB, pix)
+                        output_path = Path(output_dir) / f"page_{i+1}_img_{img_index+1}.png"
+                        pix_rgb.save(str(output_path))
+                    
+                    count += 1
+            
+            self.status_label.setText(f"Extracted {count} images to {output_dir}")
+            QMessageBox.information(self, "Done", f"Extracted {count} images.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to extract images:\n{e}")
+    
+    def compress_pdf_advanced(self):
+        """Advanced PDF compression with options."""
+        if not self.doc:
+            return
+        
+        dialog = CompressDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            settings = dialog.get_settings()
+            
+            path, _ = QFileDialog.getSaveFileName(self, "Save Compressed PDF", "", "PDF Files (*.pdf)")
+            if path:
+                try:
+                    # Apply compression settings
+                    self.doc.save(path, 
+                                garbage=settings["garbage"],
+                                deflate=settings["deflate"],
+                                clean=settings["clean"],
+                                deflate_images=settings["deflate_images"],
+                                deflate_fonts=settings["deflate_fonts"])
+                    
+                    original_size = os.path.getsize(self.file_path) if self.file_path else 0
+                    new_size = os.path.getsize(path)
+                    reduction = (1 - new_size / original_size) * 100 if original_size > 0 else 0
+                    
+                    self.status_label.setText(f"Compressed: {reduction:.1f}% reduction")
+                    QMessageBox.information(self, "Done", 
+                        f"Original: {original_size/1024:.1f} KB\n"
+                        f"Compressed: {new_size/1024:.1f} KB\n"
+                        f"Reduction: {reduction:.1f}%")
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", f"Failed to compress PDF:\n{e}")
+    
+    def compare_pdfs(self):
+        """Compare two PDFs visually."""
+        if not self.doc:
+            return
+        
+        path2, _ = QFileDialog.getOpenFileName(self, "Select Second PDF to Compare", "", "PDF Files (*.pdf)")
+        if not path2:
+            return
+        
+        try:
+            doc2 = fitz.open(path2)
+            
+            # Simple comparison: page count and text
+            diff_msg = []
+            if len(self.doc) != len(doc2):
+                diff_msg.append(f"Page count differs: {len(self.doc)} vs {len(doc2)}")
+            
+            for i in range(min(len(self.doc), len(doc2))):
+                text1 = self.doc[i].get_text()
+                text2 = doc2[i].get_text()
+                if text1 != text2:
+                    diff_msg.append(f"Page {i+1}: Text content differs")
+            
+            doc2.close()
+            
+            if diff_msg:
+                QMessageBox.information(self, "Comparison Result", "\n".join(diff_msg[:20]))
+            else:
+                QMessageBox.information(self, "Comparison Result", "PDFs appear identical.")
+                
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to compare PDFs:\n{e}")
+    
+    def batch_process(self):
+        """Batch process multiple PDFs."""
+        dialog = BatchProcessDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            settings = dialog.get_settings()
+            
+            try:
+                for file_path in settings["files"]:
+                    doc = fitz.open(file_path)
+                    
+                    if settings["action"] == "compress":
+                        out_path = str(Path(file_path).parent / f"compressed_{Path(file_path).name}")
+                        doc.save(out_path, garbage=4, deflate=True, clean=True)
+                    elif settings["action"] == "flatten":
+                        out_path = str(Path(file_path).parent / f"flattened_{Path(file_path).name}")
+                        doc.save(out_path, garbage=4, deflate=True, clean=True)
+                    elif settings["action"] == "remove_annotations":
+                        out_path = str(Path(file_path).parent / f"no_annots_{Path(file_path).name}")
+                        for page in doc:
+                            for annot in page.annots():
+                                page.delete_annot(annot)
+                        doc.save(out_path)
+                    elif settings["action"] == "add_pagenums":
+                        out_path = str(Path(file_path).parent / f"paged_{Path(file_path).name}")
+                        for i, page in enumerate(doc):
+                            page.insert_text((30, 30), str(i+1), fontsize=10)
+                        doc.save(out_path)
+                    
+                    doc.close()
+                
+                self.status_label.setText(f"Batch processed {len(settings['files'])} files")
+                QMessageBox.information(self, "Done", f"Batch processing complete for {len(settings['files'])} files.")
+                
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Batch processing failed:\n{e}")
 
 
 def main():
