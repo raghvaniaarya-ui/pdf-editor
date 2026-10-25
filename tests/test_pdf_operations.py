@@ -1,195 +1,246 @@
-import pytest
-import tempfile
-import os
-from pathlib import Path
+"""Tests for the PDF helpers in ``main`` that do not need a window."""
 
 import pymupdf as fitz
+import pytest
+
+import main
 
 
-class TestPDFOperations:
-    """Test core PDF operations."""
-
-    @pytest.fixture
-    def sample_pdf(self):
-        """Create a simple test PDF."""
-        doc = fitz.open()
+@pytest.fixture
+def document():
+    doc = fitz.open()
+    for _ in range(3):
         page = doc.new_page()
-        page.insert_text((72, 72), "Test Page 1", fontsize=12)
-        page.insert_text((72, 144), "This is a test PDF for unit tests.", fontsize=10)
-        
-        page2 = doc.new_page()
-        page2.insert_text((72, 72), "Test Page 2", fontsize=12)
-        page2.insert_text((72, 144), "Second page content.", fontsize=10)
-        
-        # Create temp file path without holding it open
-        tmp_path = tempfile.mktemp(suffix=".pdf")
-        doc.save(tmp_path)
-        doc.close()
-        yield tmp_path
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
+        page.insert_text((72, 72), "Test Page", fontsize=12)
+    yield doc
+    doc.close()
 
-    def test_pdf_creation(self, sample_pdf):
-        """Test that we can create and open a PDF."""
-        doc = fitz.open(sample_pdf)
-        assert doc.page_count == 2
-        doc.close()
 
-    def test_text_extraction(self, sample_pdf):
-        """Test text extraction from PDF."""
-        doc = fitz.open(sample_pdf)
-        text = doc[0].get_text()
-        assert "Test Page 1" in text
-        assert "test PDF" in text
-        doc.close()
+class TestParsePageRange:
+    """`parse_page_range` is shared by export, Bates numbering and the dialogs."""
 
-    def test_page_navigation(self, sample_pdf):
-        """Test page count and navigation."""
-        doc = fitz.open(sample_pdf)
-        assert len(doc) == 2
-        assert doc[0].number == 0
-        assert doc[1].number == 1
-        doc.close()
+    def test_single_range(self):
+        assert main.parse_page_range("1-3", 5) == [0, 1, 2]
 
-    def test_save_incremental(self, sample_pdf):
-        """Test incremental save preserves content."""
-        # Copy to a new file for incremental save test
-        import shutil
-        test_file = sample_pdf.replace(".pdf", "_inc.pdf")
-        shutil.copy2(sample_pdf, test_file)
-        
+    def test_comma_separated(self):
+        assert main.parse_page_range("1,3,5", 5) == [0, 2, 4]
+
+    def test_mixed(self):
+        assert main.parse_page_range("2-4,6", 10) == [1, 2, 3, 5]
+
+    def test_clamped_to_page_count(self):
+        assert main.parse_page_range("1-10", 3) == [0, 1, 2]
+
+    def test_whitespace_and_duplicates(self):
+        assert main.parse_page_range(" 2 - 3 , 2 ", 5) == [1, 2]
+
+    def test_reversed_range(self):
+        assert main.parse_page_range("4-2", 5) == [1, 2, 3]
+
+    @pytest.mark.parametrize("spec", ["abc", "1-", "1,x", "3--4"])
+    def test_invalid_input(self, spec):
+        with pytest.raises(ValueError):
+            main.parse_page_range(spec, 10)
+
+
+class TestStampPosition:
+    """Positioning used for page numbers and Bates numbers."""
+
+    def test_center_is_centred(self):
+        rect = fitz.Rect(0, 0, 600, 800)
+        x, _y = main.stamp_position(rect, "bottom_center", 10, "12345")
+        text_width = fitz.get_text_length("12345", fontname="helv", fontsize=10)
+        assert x == pytest.approx((600 - text_width) / 2)
+
+    def test_right_is_flush_right(self):
+        rect = fitz.Rect(0, 0, 600, 800)
+        x, _y = main.stamp_position(rect, "top_right", 10, "12345")
+        assert x > 600 / 2
+
+    def test_bottom_and_top_rows(self):
+        rect = fitz.Rect(0, 0, 600, 800)
+        _, bottom_y = main.stamp_position(rect, "bottom_left", 10, "1")
+        _, top_y = main.stamp_position(rect, "top_left", 10, "1")
+        assert bottom_y > top_y
+
+
+class TestMetadata:
+    """Custom metadata lives outside ``Document.set_metadata``'s whitelist."""
+
+    def test_custom_metadata_round_trip(self, document):
+        main.set_custom_metadata(document, {"CaseId": "ABC-42", "Reviewer": "Ada"})
+        assert main.get_custom_metadata(document) == {
+            "CaseId": "ABC-42",
+            "Reviewer": "Ada",
+        }
+
+    def test_custom_metadata_replaces_removed_keys(self, document):
+        main.set_custom_metadata(document, {"A": "1", "B": "2"})
+        main.set_custom_metadata(document, {"A": "1"})
+        assert main.get_custom_metadata(document) == {"A": "1"}
+
+    def test_custom_metadata_keeps_standard_keys(self, document):
+        document.set_metadata({"title": "Report"})
+        main.set_custom_metadata(document, {"CaseId": "X"})
+        assert document.metadata["title"] == "Report"
+        assert main.get_custom_metadata(document) == {"CaseId": "X"}
+
+    def test_custom_metadata_survives_save(self, document, tmp_path):
+        main.set_custom_metadata(document, {"CaseId": "ABC-42"})
+        path = tmp_path / "meta.pdf"
+        document.save(str(path))
+        reopened = fitz.open(str(path))
         try:
-            doc = fitz.open(test_file)
-            page = doc[0]
-            page.insert_text((72, 200), "Added text", fontsize=10)
-            doc.save(test_file, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
-            doc.close()
-            
-            # Verify saved file
-            doc2 = fitz.open(test_file)
-            assert doc2.page_count == 2
-            text = doc2[0].get_text()
-            assert "Added text" in text
-            doc2.close()
+            assert main.get_custom_metadata(reopened) == {"CaseId": "ABC-42"}
         finally:
-            if os.path.exists(test_file):
-                os.unlink(test_file)
+            reopened.close()
 
-    def test_merge_pdfs(self, sample_pdf):
-        """Test merging multiple PDFs."""
-        doc1 = fitz.open(sample_pdf)
-        doc2 = fitz.open(sample_pdf)
-        
-        merged = fitz.open()
-        merged.insert_pdf(doc1)
-        merged.insert_pdf(doc2)
-        
-        assert merged.page_count == 4
-        doc1.close()
-        doc2.close()
-        merged.close()
+    def test_pdf_version_string(self, document):
+        assert main.pdf_version_string(document).startswith("PDF ")
 
-    def test_split_pdf(self, sample_pdf):
-        """Test splitting PDF into individual pages."""
+    def test_metadata_without_info_dictionary(self):
+        doc = fitz.open()
+        doc.new_page()
+        assert main.get_custom_metadata(doc) == {}
+        doc.close()
+
+
+class TestPixmapSaving:
+    """TIFF and BMP cannot be written by PyMuPDF itself."""
+
+    @pytest.mark.parametrize("suffix", ["png", "jpg", "tiff", "bmp"])
+    def test_save_pixmap(self, qapp, document, tmp_path, suffix):
+        path = tmp_path / f"page.{suffix}"
+        pix = document[0].get_pixmap(alpha=False)
+        main.save_pixmap(pix, path, suffix, 85)
+        assert path.exists()
+        assert path.stat().st_size > 0
+
+
+class TestCorePdfOperations:
+    """The basic operations the editor relies on."""
+
+    def test_pdf_creation_and_text(self, sample_pdf):
         doc = fitz.open(sample_pdf)
-        
-        with tempfile.TemporaryDirectory() as tmpdir:
-            for i in range(len(doc)):
+        try:
+            assert doc.page_count == 3
+            assert "Page 1 title" in doc[0].get_text()
+            assert "lazy dog" in doc[2].get_text()
+        finally:
+            doc.close()
+
+    def test_navigation(self, sample_pdf):
+        doc = fitz.open(sample_pdf)
+        try:
+            assert len(doc) == 3
+            assert doc[0].number == 0
+            assert doc[2].number == 2
+        finally:
+            doc.close()
+
+    def test_incremental_save(self, sample_pdf, tmp_path):
+        path = tmp_path / "incremental.pdf"
+        path.write_bytes(open(sample_pdf, "rb").read())
+        doc = fitz.open(str(path))
+        doc[0].insert_text((72, 200), "Added text", fontsize=10)
+        doc.save(str(path), incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
+        doc.close()
+
+        reopened = fitz.open(str(path))
+        try:
+            assert "Added text" in reopened[0].get_text()
+        finally:
+            reopened.close()
+
+    def test_merge(self, sample_pdf):
+        first = fitz.open(sample_pdf)
+        second = fitz.open(sample_pdf)
+        merged = fitz.open()
+        try:
+            merged.insert_pdf(first)
+            merged.insert_pdf(second)
+            assert merged.page_count == 6
+        finally:
+            merged.close()
+            first.close()
+            second.close()
+
+    def test_split(self, sample_pdf, tmp_path):
+        doc = fitz.open(sample_pdf)
+        try:
+            for i in range(doc.page_count):
                 single = fitz.open()
                 single.insert_pdf(doc, from_page=i, to_page=i)
-                single.save(Path(tmpdir) / f"page_{i+1}.pdf")
+                single.save(str(tmp_path / f"page_{i + 1}.pdf"))
                 single.close()
-            
-            files = list(Path(tmpdir).glob("*.pdf"))
-            assert len(files) == 2
-
-    def test_export_page_as_image(self, sample_pdf):
-        """Test exporting page as image."""
-        doc = fitz.open(sample_pdf)
-        page = doc[0]
-        
-        # Create temp file path without holding it open
-        tmp_path = tempfile.mktemp(suffix=".png")
-        try:
-            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-            pix.save(tmp_path)
-            assert os.path.exists(tmp_path)
-            assert os.path.getsize(tmp_path) > 0
         finally:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-        doc.close()
+            doc.close()
+        assert len(list(tmp_path.glob("page_*.pdf"))) == 3
+
+    def test_export_page_as_image(self, sample_pdf, tmp_path):
+        doc = fitz.open(sample_pdf)
+        try:
+            pix = doc[0].get_pixmap(matrix=fitz.Matrix(2, 2))
+        finally:
+            doc.close()
+        target = tmp_path / "page.png"
+        pix.save(str(target))
+        assert target.stat().st_size > 0
 
     def test_zoom_matrix(self):
-        """Test zoom matrix calculations."""
-        mat = fitz.Matrix(2.0, 2.0)
-        assert mat.a == 2.0
-        assert mat.d == 2.0
-        
-        mat2 = fitz.Matrix(1.5, 1.5)
-        assert mat2.a == 1.5
+        assert fitz.Matrix(2.0, 2.0).a == 2.0
+        assert fitz.Matrix(1.5, 1.5).d == 1.5
 
     def test_rect_operations(self):
-        """Test fitz.Rect operations."""
         rect = fitz.Rect(0, 0, 100, 100)
-        assert rect.width == 100
-        assert rect.height == 100
-        assert rect.x0 == 0
-        assert rect.y0 == 0
-        
-        # Test intersection
-        rect2 = fitz.Rect(50, 50, 150, 150)
-        intersect = rect & rect2
-        assert intersect.width == 50
-        assert intersect.height == 50
+        other = fitz.Rect(50, 50, 150, 150)
+        intersection = rect & other
+        assert (intersection.width, intersection.height) == (50, 50)
 
 
-class TestPDFPageWidget:
-    """Test PDFPageWidget logic (without GUI)."""
+class TestPdfFeatures:
+    """Features that used to raise at runtime."""
 
-    def test_zoom_calculation(self):
-        """Test zoom level calculations."""
-        zoom_levels = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0]
-        for z in zoom_levels:
-            percent = int(z * 100)
-            assert percent == int(z * 100)
+    def test_stamp_constants_are_ints(self):
+        assert all(isinstance(value, int) for value in main.STAMP_TYPES.values())
+        assert len(main.STAMP_TYPES) >= 10
 
-    def test_fit_width_calculation(self):
-        """Test fit-width zoom calculation."""
-        page_width = 800  # points
-        viewport_width = 1200  # pixels
-        zoom = viewport_width / page_width
-        assert zoom == 1.5
+    def test_stamp_annotation_can_be_added(self, document):
+        annot = document[0].add_stamp_annot(fitz.Rect(10, 10, 100, 50), main.STAMP_TYPES["Approved"])
+        assert annot is not None
+        assert annot.type[1] == "Stamp"
 
+    def test_watermark_pixmap_gets_alpha(self, image_file):
+        pix = main.load_translucent_pixmap(image_file, 0.3)
+        assert pix.alpha == 1
+        assert pix.n == 4
 
-class TestUtilities:
-    """Test utility functions."""
+    def test_clone_document_is_independent(self, document):
+        clone = main.clone_document(document)
+        try:
+            clone[0].insert_text((72, 300), "only in clone")
+            assert "only in clone" in clone[0].get_text()
+            assert "only in clone" not in document[0].get_text()
+        finally:
+            clone.close()
 
-    def test_page_range_parsing(self):
-        """Test page range string parsing."""
-        def parse_range(range_str, max_pages):
-            pages = []
-            for part in range_str.split(","):
-                if "-" in part:
-                    start, end = map(int, part.split("-"))
-                    pages.extend(range(start - 1, end))
-                else:
-                    pages.append(int(part) - 1)
-            return [p for p in pages if 0 <= p < max_pages]
-        
-        assert parse_range("1-3", 5) == [0, 1, 2]
-        assert parse_range("1,3,5", 5) == [0, 2, 4]
-        assert parse_range("2-4,6", 10) == [1, 2, 3, 5]
-        assert parse_range("1-10", 3) == [0, 1, 2]  # Clamped
+    def test_bake_removes_annotations(self, document):
+        document[0].add_text_annot(fitz.Point(100, 100), "note")
+        assert list(document[0].annots())
+        document.bake()
+        assert not list(document[0].annots())
 
-    def test_dark_mode_toggle(self):
-        """Test dark mode state management."""
-        dark_mode = False
-        dark_mode = not dark_mode
-        assert dark_mode is True
-        dark_mode = not dark_mode
-        assert dark_mode is False
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+    def test_encrypt_and_unlock_round_trip(self, document, tmp_path):
+        protected = tmp_path / "protected.pdf"
+        document.save(
+            str(protected),
+            encryption=fitz.PDF_ENCRYPT_AES_256,
+            user_pw="secret",
+            owner_pw="owner",
+        )
+        doc = fitz.open(str(protected))
+        try:
+            assert doc.needs_pass
+            assert doc.authenticate("secret")
+        finally:
+            doc.close()

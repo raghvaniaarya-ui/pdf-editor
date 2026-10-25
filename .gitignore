@@ -1,15 +1,24 @@
 # Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*.egg-info/
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
 .coverage
+coverage.xml
+htmlcov/
 
-# PyInstaller
+# PyInstaller output (the .spec file *is* tracked - it is the build recipe)
 build/
 dist/
-*.spec
+
+# Virtual environments
+venv/
+.venv/
+env/
+.ENV
+.env
 
 # IDE
 .vscode/
@@ -20,11 +29,6 @@ dist/
 # OS
 .DS_Store
 Thumbs.db
-
-# Virtual environments
-venv/
-env/
-.env
 
 # Logs
 *.log

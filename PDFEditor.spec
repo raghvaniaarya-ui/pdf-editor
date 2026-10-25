@@ -1,16 +1,29 @@
 # -*- mode: python ; coding: utf-8 -*-
-
+"""PyInstaller build recipe - use ``pyinstaller PDFEditor.spec``."""
 
 a = Analysis(
-    ['main.py'],
+    ["main.py"],
     pathex=[],
     binaries=[],
     datas=[],
-    hiddenimports=['pymupdf', 'fitz'],
+    hiddenimports=["pymupdf", "fitz"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['torch', 'transformers', 'pandas', 'scipy', 'matplotlib', 'cv2', 'tensorflow', 'torchvision', 'torchaudio', 'pyarrow', 'PIL', 'numpy'],
+    # Heavy optional dependencies that the editor never imports.  Pillow is
+    # deliberately *not* excluded because the optional OCR feature needs it.
+    excludes=[
+        "torch",
+        "transformers",
+        "pandas",
+        "scipy",
+        "matplotlib",
+        "cv2",
+        "tensorflow",
+        "torchvision",
+        "torchaudio",
+        "pyarrow",
+    ],
     noarchive=False,
     optimize=0,
 )
@@ -22,14 +35,15 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='PDFEditor',
+    name="PDFEditor",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,
+    # A GUI application: no console window, and no crashing on error dialogs.
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

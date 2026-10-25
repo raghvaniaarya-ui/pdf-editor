@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pdf-editor"
+version = "1.1.0"
+description = "A PyQt6 + PyMuPDF desktop PDF viewer and editor"
+requires-python = ">=3.10"
+dependencies = [
+    "PyQt6>=6.6.0",
+    "PyMuPDF>=1.24.0",
+]
+
+[tool.setuptools]
+py-modules = ["main"]
+
+[tool.ruff]
+# Keep linting deterministic across CI runs.
+target-version = "py310"
+line-length = 100
+src = ["."]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "C4", "RUF"]
+ignore = [
+    # The UI deliberately catches broad exceptions to surface them in a dialog
+    # instead of crashing the application.
+    "BLE001",
+    # Emoji / typographic characters are part of the UI strings.
+    "RUF001",
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["main"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_ignores = false
+check_untyped_defs = false
+exclude = ["build/", "dist/"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+filterwarnings = ["ignore::DeprecationWarning"]

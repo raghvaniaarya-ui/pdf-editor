@@ -1,29 +1,260 @@
+"""PDF Editor -- a PyQt6 + PyMuPDF desktop PDF viewer/editor.
+
+Run with ``python main.py``.  See README.md for features, shortcuts and
+development instructions.
+"""
+
+from __future__ import annotations
+
+import os
+import re
 import sys
 from pathlib import Path
-from typing import Optional
-
-from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QFileDialog, QMessageBox,
-    QVBoxLayout, QHBoxLayout, QWidget, QToolBar,
-    QLabel, QSpinBox, QComboBox, QScrollArea,
-    QDockWidget, QListWidget, QListWidgetItem,
-    QMenu, QInputDialog, QColorDialog, QDialog,
-    QDialogButtonBox, QFormLayout, QLineEdit,
-    QTextEdit, QPushButton, QCheckBox, QSplitter,
-    QTabWidget, QTabBar, QScrollBar, QFrame,
-    QSlider, QButtonGroup, QRadioButton, QGroupBox,
-    QTreeWidget, QTreeWidgetItem, QTableWidget,
-    QTableWidgetItem, QHeaderView, QAbstractItemView
-)
-from PyQt6.QtCore import Qt, QRectF, QSize, QPoint, pyqtSignal, QTimer, QMimeData, QEvent, QSettings
-from PyQt6.QtGui import (
-    QAction, QIcon, QPixmap, QImage, QKeySequence,
-    QPainter, QPen, QColor, QBrush, QCursor,
-    QFont, QShortcut, QDrag, QStandardItemModel,
-    QStandardItem
-)
 
 import pymupdf as fitz
+from PyQt6.QtCore import (
+    QMimeData,
+    QPoint,
+    QRectF,
+    QSettings,
+    QSize,
+    Qt,
+    QTimer,
+    pyqtSignal,
+)
+from PyQt6.QtGui import (
+    QAction,
+    QBrush,
+    QColor,
+    QDrag,
+    QIcon,
+    QImage,
+    QKeySequence,
+    QPainter,
+    QPen,
+    QPixmap,
+)
+from PyQt6.QtWidgets import (
+    QApplication,
+    QButtonGroup,
+    QCheckBox,
+    QColorDialog,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QDockWidget,
+    QFileDialog,
+    QFormLayout,
+    QFrame,
+    QGroupBox,
+    QHBoxLayout,
+    QInputDialog,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMainWindow,
+    QMenu,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
+    QSlider,
+    QSpinBox,
+    QSplitter,
+    QTabWidget,
+    QTextEdit,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+APP_NAME = "PDF Editor"
+APP_VERSION = "1.1.0"
+
+#: Display name -> PyMuPDF rubber-stamp constant.  The order matches the
+#: standard Adobe stamp set.
+STAMP_TYPES = {
+    "Approved": fitz.STAMP_Approved,
+    "As Is": fitz.STAMP_AsIs,
+    "Confidential": fitz.STAMP_Confidential,
+    "Departmental": fitz.STAMP_Departmental,
+    "Draft": fitz.STAMP_Draft,
+    "Experimental": fitz.STAMP_Experimental,
+    "Expired": fitz.STAMP_Expired,
+    "Final": fitz.STAMP_Final,
+    "For Comment": fitz.STAMP_ForComment,
+    "For Public Release": fitz.STAMP_ForPublicRelease,
+    "Not Approved": fitz.STAMP_NotApproved,
+    "Not For Public Release": fitz.STAMP_NotForPublicRelease,
+    "Sold": fitz.STAMP_Sold,
+    "Top Secret": fitz.STAMP_TopSecret,
+}
+
+#: Keys that belong to the standard PDF info dictionary.  Everything else in
+#: the info dictionary is treated as user defined ("custom") metadata.
+INFO_STANDARD_KEYS = {
+    "author",
+    "creationdate",
+    "creator",
+    "encryption",
+    "format",
+    "keywords",
+    "moddate",
+    "producer",
+    "subject",
+    "title",
+    "trapped",
+}
+
+
+def parse_page_range(spec: str, page_count: int) -> list[int]:
+    """Convert a 1-based page range string into 0-based page indices.
+
+    ``"1-3,5"`` becomes ``[0, 1, 2, 4]``.  Out of range values are dropped,
+    duplicates are removed and the input order is preserved.  An empty or
+    malformed entry raises :class:`ValueError`.
+    """
+    pages: list[int] = []
+    for raw_part in spec.split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        match = re.fullmatch(r"(\d+)(?:\s*-\s*(\d+))?", part)
+        if not match:
+            raise ValueError(f"Invalid page range entry: {part!r}")
+        start = int(match.group(1))
+        end = int(match.group(2)) if match.group(2) is not None else start
+        if start > end:
+            start, end = end, start
+        pages.extend(range(start - 1, end))
+    result: list[int] = []
+    for page in pages:
+        if 0 <= page < page_count and page not in result:
+            result.append(page)
+    return result
+
+
+def stamp_position(
+    page_rect: fitz.Rect,
+    position: str,
+    fontsize: float,
+    text: str,
+    margin: float = 30,
+) -> tuple[float, float]:
+    """Return the (x, y) baseline for text stamped on a page.
+
+    ``position`` is one of ``bottom_center``, ``bottom_right``,
+    ``bottom_left``, ``top_center``, ``top_right``, ``top_left``.
+    """
+    width = fitz.get_text_length(text, fontname="helv", fontsize=fontsize)
+    if position.endswith("center"):
+        x = max(margin, (page_rect.width - width) / 2)
+    elif position.endswith("right"):
+        x = max(margin, page_rect.width - width - margin)
+    else:
+        x = margin
+    if position.startswith("bottom"):
+        y = page_rect.height - margin
+    else:
+        y = margin + fontsize
+    return x, y
+
+
+def pdf_version_string(doc: fitz.Document) -> str:
+    """Return a human readable PDF version, e.g. ``"PDF 1.7"``."""
+    return doc.metadata.get("format") or "Unknown"
+
+
+def clone_document(doc: fitz.Document) -> fitz.Document:
+    """Return an independent in-memory copy of ``doc``.
+
+    Used by operations that must not mutate the document the user is
+    currently editing (page numbers, watermarks, flattening, ...).
+    """
+    return fitz.open("pdf", doc.tobytes())
+
+
+def _info_xref(doc: fitz.Document, create: bool = False) -> int | None:
+    """Return the xref of the document info dictionary."""
+    kind, value = doc.xref_get_key(-1, "Info")
+    if kind == "xref":
+        return int(value.split()[0])
+    if not create:
+        return None
+    xref = doc.get_new_xref()
+    doc.update_object(xref, "<<>>")
+    doc.xref_set_key(-1, "Info", f"{xref} 0 R")
+    return xref
+
+
+def get_custom_metadata(doc: fitz.Document) -> dict[str, str]:
+    """Return the non-standard keys stored in the document info dictionary."""
+    xref = _info_xref(doc)
+    if xref is None:
+        return {}
+    metadata: dict[str, str] = {}
+    for key in doc.xref_get_keys(xref):
+        if key.lower() in INFO_STANDARD_KEYS:
+            continue
+        kind, value = doc.xref_get_key(xref, key)
+        if kind == "null":
+            continue
+        if kind in {"string", "name", "text"}:
+            value = value.strip()
+            if value.startswith("(") and value.endswith(")"):
+                value = value[1:-1]
+        metadata[key] = value
+    return metadata
+
+
+def set_custom_metadata(doc: fitz.Document, metadata: dict[str, str]) -> None:
+    """Replace the custom metadata of ``doc`` with ``metadata``."""
+    xref = _info_xref(doc, create=True)
+    if xref is None:  # pragma: no cover - defensive
+        raise RuntimeError("Could not create the PDF info dictionary")
+    existing = {key.lower(): key for key in doc.xref_get_keys(xref)}
+    wanted = {key.lower(): (key, value) for key, value in metadata.items()}
+
+    for key in list(doc.xref_get_keys(xref)):
+        lower = key.lower()
+        if lower in INFO_STANDARD_KEYS or lower in wanted:
+            continue
+        # PyMuPDF has no dictionary-key removal API; a null value is the
+        # documented way of removing an entry from a PDF dictionary.
+        doc.xref_set_key(xref, key, "null")
+
+    for lower, (key, value) in wanted.items():
+        doc.xref_set_key(xref, existing.get(lower, key), fitz.get_pdf_str(value))
+
+
+def load_translucent_pixmap(path: str | Path, opacity: float) -> fitz.Pixmap:
+    """Load an image and apply a uniform ``opacity`` (0-1) as its alpha channel."""
+    source = fitz.Pixmap(str(path))
+    rgb = source if source.n == 3 else fitz.Pixmap(fitz.csRGB, source)
+    alpha = bytes([max(1, min(255, int(opacity * 255)))]) * (rgb.width * rgb.height)
+    return fitz.Pixmap(fitz.csRGB, rgb.width, rgb.height, rgb.samples + alpha, 1)
+
+
+def save_pixmap(pix: fitz.Pixmap, path: str | Path, fmt: str, quality: int = 90) -> None:
+    """Save ``pix`` as ``path``.
+
+    PyMuPDF can only write PNG/JPG itself, so TIFF and BMP are written through
+    Qt (which ships the required image format plugins).
+    """
+    fmt = fmt.lower().lstrip(".")
+    if fmt == "png":
+        pix.save(str(path))
+        return
+    image = QImage(
+        pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888
+    ).copy()
+    qt_format = {"jpg": "JPEG", "jpeg": "JPEG", "tif": "TIFF", "tiff": "TIFF"}.get(
+        fmt, fmt.upper()
+    )
+    if not image.save(str(path), qt_format, quality):
+        raise OSError(f"Could not write image: {path}")
+
 
 
 class PDFPageWidget(QWidget):
@@ -51,20 +282,27 @@ class PDFPageWidget(QWidget):
         self.selection_end = None
         
         # Freehand drawing
-        self.draw_path = []
-        self.draw_paths = []  # List of completed paths
+        self.draw_path: list = []
+        self.draw_paths: list = []  # List of completed paths
         
         # Redaction
-        self.redact_rects = []  # List of redaction rectangles
+        self.redact_rects: list = []  # List of redaction rectangles
         self.redact_preview = None  # Current redaction preview rect
         
         # Highlights storage
-        self.highlights = []
+        self.highlights: list = []
+
+        # Active markup type ("highlight"/"underline"/"strikeout") or None for
+        # the little "what do you want?" menu, plus the selected stamp.
+        self.markup_kind: str | None = None
+        self.stamp_type = "Approved"
         
-        # Lazy rendering
+        # Lazy rendering - one timer per widget, reused for every zoom change
         self._pixmap = None
         self._rendered_zoom = None
-        self._render_timer = None
+        self._render_timer = QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.timeout.connect(self._render_pixmap)
     
     def _render_pixmap(self):
         """Render page to pixmap at current zoom."""
@@ -79,18 +317,13 @@ class PDFPageWidget(QWidget):
     
     def ensure_rendered(self):
         """Render if not already rendered at current zoom."""
-        if self._pixmap is None or abs(self._rendered_zoom - self.zoom) > 0.01:
+        if self._pixmap is None or abs((self._rendered_zoom or 0.0) - self.zoom) > 0.01:
             self._render_pixmap()
             self.update()
     
     def set_zoom(self, zoom: float):
         self.zoom = zoom
-        # Defer rendering to avoid blocking UI
-        if self._render_timer:
-            self._render_timer.stop()
-        self._render_timer = QTimer(self)
-        self._render_timer.setSingleShot(True)
-        self._render_timer.timeout.connect(self._render_pixmap)
+        # Defer rendering to avoid blocking the UI
         self._render_timer.start(0)
     
     def set_annot_mode(self, enabled: bool):
@@ -104,6 +337,8 @@ class PDFPageWidget(QWidget):
         self.redact_mode = False
         self.draw_mode = False
         self.stamp_mode = False
+        if not enabled:
+            self.markup_kind = None
         self.setCursor(Qt.CursorShape.IBeamCursor if enabled else Qt.CursorShape.ArrowCursor)
     
     def set_redact_mode(self, enabled: bool):
@@ -130,9 +365,15 @@ class PDFPageWidget(QWidget):
         self.draw_mode = False
         self.setCursor(Qt.CursorShape.PointingHandCursor if enabled else Qt.CursorShape.ArrowCursor)
     
-    def add_highlight(self, rect: fitz.Rect, color: tuple = (1, 1, 0), opacity: float = 0.3):
-        """Add a highlight annotation to the page."""
-        annot = self.page.add_highlight_annot(rect)
+    def _add_text_markup(self, rect: fitz.Rect, kind: str, color: tuple, opacity: float):
+        """Add a highlight/underline/strikeout annotation and repaint."""
+        add = {
+            "highlight": self.page.add_highlight_annot,
+            # the runtime API exists, it is simply missing from the stubs
+            "underline": self.page.add_underline_annot,
+            "strikeout": self.page.add_strikeout_annot,
+        }[kind]
+        annot = add(rect)
         if annot:
             annot.set_colors(stroke=color)
             annot.set_opacity(opacity)
@@ -140,10 +381,25 @@ class PDFPageWidget(QWidget):
             self.highlights.append((rect, color, opacity))
             self._render_pixmap()
             self.update()
+            self.annotation_added.emit(
+                self.page_num,
+                {"type": kind, "rect": (rect.x0, rect.y0, rect.x1, rect.y1)},
+            )
+
+    def add_highlight(self, rect: fitz.Rect, color: tuple = (1, 1, 0), opacity: float = 0.3):
+        """Add a highlight annotation to the page."""
+        self._add_text_markup(rect, "highlight", color, opacity)
+
+    def add_underline(self, rect: fitz.Rect, color: tuple = (1, 0, 0), opacity: float = 0.8):
+        """Add an underline annotation to the page."""
+        self._add_text_markup(rect, "underline", color, opacity)
+
+    def add_strikeout(self, rect: fitz.Rect, color: tuple = (1, 0, 0), opacity: float = 0.8):
+        """Add a strike-out annotation to the page."""
+        self._add_text_markup(rect, "strikeout", color, opacity)
     
     def add_text_annotation(self, point: fitz.Point, text: str, color: tuple = (1, 1, 0)):
         """Add a text annotation (sticky note)."""
-        rect = fitz.Rect(point.x - 20, point.y - 20, point.x + 20, point.y + 20)
         annot = self.page.add_text_annot(point, text)
         if annot:
             annot.set_colors(stroke=color)
@@ -172,12 +428,13 @@ class PDFPageWidget(QWidget):
         for path in self.draw_paths:
             if len(path) < 2:
                 continue
-            # Convert to PDF coordinates and add as ink annotation
-            pdf_points = [fitz.Point(p.x() / self.zoom, p.y() / self.zoom) for p in path]
-            annot = self.page.add_ink_annot(pdf_points)
+            # Convert to PDF coordinates and add as ink annotation.
+            # PyMuPDF expects a list of strokes, each stroke a list of points.
+            stroke = [(p.x() / self.zoom, p.y() / self.zoom) for p in path]
+            annot = self.page.add_ink_annot([stroke])
             if annot:
                 annot.set_colors(stroke=(0, 0, 1))  # Blue ink
-                annot.set_border_width(2)
+                annot.set_border(width=2)
                 annot.update()
         
         self.draw_paths.clear()
@@ -185,10 +442,10 @@ class PDFPageWidget(QWidget):
         self.update()
     
     def add_stamp(self, point: fitz.Point, stamp_type: str = "Approved"):
-        """Add a stamp annotation."""
-        # Create a rubber stamp annotation
+        """Add a rubber stamp annotation."""
         rect = fitz.Rect(point.x - 60, point.y - 30, point.x + 60, point.y + 30)
-        annot = self.page.add_stamp_annot(rect, stamp_type)
+        stamp = STAMP_TYPES.get(stamp_type, fitz.STAMP_Approved)
+        annot = self.page.add_stamp_annot(rect, stamp)
         if annot:
             annot.update()
             self._render_pixmap()
@@ -225,7 +482,7 @@ class PDFPageWidget(QWidget):
             pos = event.position()
             pdf_x = pos.x() / self.zoom
             pdf_y = pos.y() / self.zoom
-            self.add_stamp(fitz.Point(pdf_x, pdf_y))
+            self.add_stamp(fitz.Point(pdf_x, pdf_y), self.stamp_type)
     
     def mouseMoveEvent(self, event):
         if self.select_mode and self.selection_start and event.buttons() & Qt.MouseButton.LeftButton:
@@ -252,16 +509,27 @@ class PDFPageWidget(QWidget):
             
             if text.strip():
                 self.text_selected.emit(self.page_num, text.strip())
-                
-                menu = QMenu(self)
-                highlight_action = menu.addAction("Highlight")
-                underline_action = menu.addAction("Underline")
-                action = menu.exec(self.mapToGlobal(event.pos().toPoint()))
-                
-                if action == highlight_action:
+
+                kind = self.markup_kind
+                if kind is None:
+                    menu = QMenu(self)
+                    highlight_action = menu.addAction("Highlight")
+                    underline_action = menu.addAction("Underline")
+                    strikeout_action = menu.addAction("Strikethrough")
+                    action = menu.exec(self.mapToGlobal(event.pos().toPoint()))
+                    if action == highlight_action:
+                        kind = "highlight"
+                    elif action == underline_action:
+                        kind = "underline"
+                    elif action == strikeout_action:
+                        kind = "strikeout"
+
+                if kind == "highlight":
                     self.add_highlight(rect, (1, 1, 0), 0.3)
-                elif action == underline_action:
-                    self.add_highlight(rect, (1, 0, 0), 0.5)
+                elif kind == "underline":
+                    self.add_underline(rect)
+                elif kind == "strikeout":
+                    self.add_strikeout(rect)
             
             self.selection_start = None
             self.selection_end = None
@@ -330,7 +598,10 @@ class ThumbnailWidget(QWidget):
     
     def __init__(self, page: fitz.Page, page_num: int):
         super().__init__()
+        # page_num is the position in the sidebar, page_index the position in
+        # the document.  They only differ after a drag & drop reorder.
         self.page_num = page_num
+        self.page_index = page_num
         self.setFixedSize(120, 160)
         self.setToolTip(f"Page {page_num + 1}")
         self.setAcceptDrops(True)
@@ -421,30 +692,76 @@ class ThumbnailSidebar(QDockWidget):
             self._page_widgets.append(widget)
     
     def _on_drop_requested(self, source_page: int, target_page: int):
-        """Handle drag & drop reordering."""
-        # Move widget in list
+        """Handle drag & drop reordering of pages."""
+        if not (0 <= source_page < len(self._page_widgets)):
+            return
+        if not (0 <= target_page < len(self._page_widgets)):
+            return
+
+        # Move the widget (page_index travels with it)
         widget = self._page_widgets.pop(source_page)
         self._page_widgets.insert(target_page, widget)
-        
-        # Rebuild list widget
+
+        # Rebuild the list and refresh the displayed page numbers
         self.list_widget.clear()
         for i, w in enumerate(self._page_widgets):
             item = QListWidgetItem()
-            w.page_num = i  # Update page number
-            w.setToolTip(f"Page {i + 1}")
+            w.page_num = i
+            a = w.page_index + 1
+            w.setToolTip(f"Page {a}")
             item.setSizeHint(w.sizeHint())
             self.list_widget.addItem(item)
             self.list_widget.setItemWidget(item, w)
-        
-        # Emit new order
-        self.pages_reordered.emit([w.page_num for w in self._page_widgets])
+
+        # Emit the new document order (original page indices)
+        self.pages_reordered.emit([w.page_index for w in self._page_widgets])
     
     def set_current_page(self, page_num: int):
         self.list_widget.setCurrentRow(page_num)
     
     def get_page_order(self):
-        """Return current page order."""
-        return [w.page_num for w in self._page_widgets]
+        """Return the current document order (0-based page indices)."""
+        return [w.page_index for w in self._page_widgets]
+
+
+class CropDialog(QDialog):
+    """Dialog asking for crop margins (in points)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Crop Pages")
+        self.resize(320, 240)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.top_spin = QSpinBox()
+        self.right_spin = QSpinBox()
+        self.bottom_spin = QSpinBox()
+        self.left_spin = QSpinBox()
+        for spin in (self.top_spin, self.right_spin, self.bottom_spin, self.left_spin):
+            spin.setRange(0, 500)
+            spin.setSuffix(" pt")
+        form.addRow("Top:", self.top_spin)
+        form.addRow("Right:", self.right_spin)
+        form.addRow("Bottom:", self.bottom_spin)
+        form.addRow("Left:", self.left_spin)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_margins(self) -> tuple[int, int, int, int]:
+        """Return (top, right, bottom, left) margins in points."""
+        return (
+            self.top_spin.value(),
+            self.right_spin.value(),
+            self.bottom_spin.value(),
+            self.left_spin.value(),
+        )
 
 
 class MergeSplitDialog(QDialog):
@@ -495,45 +812,6 @@ class MergeSplitDialog(QDialog):
         return self.files
 
 
-class ExportDialog(QDialog):
-    """Dialog for exporting pages as images."""
-    
-    def __init__(self, page_count: int, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Export Pages as Images")
-        self.resize(400, 300)
-        
-        layout = QVBoxLayout(self)
-        
-        form = QFormLayout()
-        self.page_range = QLineEdit(f"1-{page_count}")
-        form.addRow("Page Range:", self.page_range)
-        
-        self.format_combo = QComboBox()
-        self.format_combo.addItems(["PNG", "JPEG", "TIFF"])
-        form.addRow("Format:", self.format_combo)
-        
-        self.dpi_spin = QSpinBox()
-        self.dpi_spin.setRange(72, 600)
-        self.dpi_spin.setValue(150)
-        self.dpi_spin.setSuffix(" DPI")
-        form.addRow("Resolution:", self.dpi_spin)
-        
-        layout.addLayout(form)
-        
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-    
-    def get_settings(self):
-        return {
-            "range": self.page_range.text(),
-            "format": self.format_combo.currentText(),
-            "dpi": self.dpi_spin.value()
-        }
-
-
 class FormFieldDialog(QDialog):
     """Dialog for filling form fields."""
     
@@ -548,7 +826,8 @@ class FormFieldDialog(QDialog):
         for field in fields:
             label = QLabel(f"{field['name']} ({field['type']})")
             layout.addWidget(label)
-            
+
+            widget: QWidget
             if field['type'] == 'text':
                 widget = QLineEdit()
                 widget.setText(field.get('value', ''))
@@ -624,14 +903,18 @@ class OutlineSidebar(QWidget):
             self.tree.expandAll()
     
     def _build_tree(self, outline, parent=None):
-        for item in outline:
-            level, title, page = item
+        """Build the bookmark tree, honouring the outline nesting levels."""
+        stack: list[tuple[int, QTreeWidgetItem]] = []
+        for level, title, page in outline:
             tree_item = QTreeWidgetItem([title])
             tree_item.setData(0, Qt.ItemDataRole.UserRole, page - 1)
-            if parent:
-                parent.addChild(tree_item)
+            while stack and stack[-1][0] >= level:
+                stack.pop()
+            if stack:
+                stack[-1][1].addChild(tree_item)
             else:
                 self.tree.addTopLevelItem(tree_item)
+            stack.append((level, tree_item))
     
     def _on_item_clicked(self, item, column):
         page = item.data(0, Qt.ItemDataRole.UserRole)
@@ -707,7 +990,7 @@ class ToolsPanel(QWidget):
             ("Add Text", "Add text box", "add_text"),
             ("Add Image", "Insert image", "add_image"),
             ("Add Link", "Create hyperlink", "add_link"),
-            ("Redact", "Redact sensitive content", "redact"),
+            ("Redact", "Redact sensitive content", "redact_tool"),
             ("Crop Pages", "Crop page margins", "crop_pages"),
         ], layout)
         
@@ -721,10 +1004,12 @@ class ToolsPanel(QWidget):
         ], layout)
         
         self._add_tool_group("Forms & Signatures", [
-            ("Prepare Form", "Auto-detect form fields", "prepare_form"),
+            ("Prepare Form", "List the existing form fields", "prepare_form"),
             ("Add Text Field", "Add text input field", "add_text_field"),
             ("Add Checkbox", "Add checkbox", "add_checkbox"),
-            ("Add Signature", "Add digital signature", "add_signature"),
+            ("Add Dropdown", "Add dropdown list", "add_dropdown"),
+            ("Add Radio Button", "Add radio button", "add_radio_button"),
+            ("Add Signature Field", "Add a signature field", "add_signature_field"),
             ("Sign Document", "Sign with certificate", "sign_document"),
         ], layout)
         
@@ -757,25 +1042,6 @@ class ToolsPanel(QWidget):
             ("PDF to Excel", "Convert to Excel spreadsheet", "pdf_to_excel"),
             ("PDF to PowerPoint", "Convert to PowerPoint", "pdf_to_ppt"),
             ("Images to PDF", "Convert images to PDF", "images_to_pdf"),
-        ], layout)
-        
-        self._add_tool_group("Page Tools", [
-            ("Rotate Left", "Rotate page 90° counter-clockwise", "rotate_left"),
-            ("Rotate Right", "Rotate page 90° clockwise", "rotate_right"),
-            ("Delete Page", "Remove current page", "delete_page"),
-            ("Insert Blank Page", "Add new blank page", "insert_page"),
-            ("Crop Pages", "Crop page margins", "crop_pages"),
-        ], layout)
-        
-        self._add_tool_group("Forms & Signatures", [
-            ("Prepare Form", "Auto-detect form fields", "prepare_form"),
-            ("Add Text Field", "Add text input field", "add_text_field"),
-            ("Add Checkbox", "Add checkbox", "add_checkbox"),
-            ("Add Radio Button", "Add radio button group", "add_radio_button"),
-            ("Add Dropdown", "Add dropdown list", "add_dropdown"),
-            ("Add Signature Field", "Add digital signature field", "add_signature_field"),
-            ("Create Signature", "Draw or import signature", "create_signature"),
-            ("Sign Document", "Sign with certificate", "sign_document"),
         ], layout)
         
         layout.addStretch()
@@ -1170,28 +1436,38 @@ class PasswordDialog(QDialog):
         layout.addWidget(buttons)
     
     def get_passwords(self):
-        user_pwd = self.user_pwd.text() if self.user_pwd.text() else None
-        owner_pwd = self.owner_pwd.text() if self.owner_pwd.text() else None
-        
-        if user_pwd != self.user_pwd_confirm.text():
+        user_text = self.user_pwd.text()
+        owner_text = self.owner_pwd.text()
+        user_pwd = user_text or None
+        owner_pwd = owner_text or None
+
+        if user_text != self.user_pwd_confirm.text():
             QMessageBox.warning(self, "Error", "User passwords don't match!")
             return None, None, 0
-        
-        if owner_pwd and owner_pwd != self.owner_pwd_confirm.text():
+
+        if owner_text != self.owner_pwd_confirm.text():
             QMessageBox.warning(self, "Error", "Owner passwords don't match!")
             return None, None, 0
         
         # Calculate permissions
         permissions = 0
-        if self.perm_print.isChecked(): permissions |= fitz.PDF_PERM_PRINT
-        if self.perm_modify.isChecked(): permissions |= fitz.PDF_PERM_MODIFY
-        if self.perm_copy.isChecked(): permissions |= fitz.PDF_PERM_COPY
-        if self.perm_annotate.isChecked(): permissions |= fitz.PDF_PERM_ANNOTATE
-        if self.perm_fill_forms.isChecked(): permissions |= fitz.PDF_PERM_FILL_FORMS
-        if self.perm_accessibility.isChecked(): permissions |= fitz.PDF_PERM_ACCESSIBILITY
-        if self.perm_assemble.isChecked(): permissions |= fitz.PDF_PERM_ASSEMBLE
-        if self.perm_print_high.isChecked(): permissions |= fitz.PDF_PERM_PRINT_HIGH
-        
+        if self.perm_print.isChecked():
+            permissions |= fitz.PDF_PERM_PRINT  # type: ignore[attr-defined]
+        if self.perm_modify.isChecked():
+            permissions |= fitz.PDF_PERM_MODIFY  # type: ignore[attr-defined]
+        if self.perm_copy.isChecked():
+            permissions |= fitz.PDF_PERM_COPY  # type: ignore[attr-defined]
+        if self.perm_annotate.isChecked():
+            permissions |= fitz.PDF_PERM_ANNOTATE  # type: ignore[attr-defined]
+        if self.perm_fill_forms.isChecked():
+            permissions |= fitz.PDF_PERM_FORM  # type: ignore[attr-defined]
+        if self.perm_accessibility.isChecked():
+            permissions |= fitz.PDF_PERM_ACCESSIBILITY  # type: ignore[attr-defined]
+        if self.perm_assemble.isChecked():
+            permissions |= fitz.PDF_PERM_ASSEMBLE  # type: ignore[attr-defined]
+        if self.perm_print_high.isChecked():
+            permissions |= fitz.PDF_PERM_PRINT_HQ  # type: ignore[attr-defined]
+
         return user_pwd, owner_pwd, permissions
 
 
@@ -1296,6 +1572,13 @@ class WatermarkDialog(QDialog):
         self.wm_color = QColor(255, 0, 0, 128)
         self.wm_color_btn.setStyleSheet("background-color: rgba(255,0,0,128);")
         text_layout.addRow("Color:", self.wm_color_btn)
+
+        self.wm_rotation = QSpinBox()
+        self.wm_rotation.setRange(0, 180)
+        self.wm_rotation.setValue(45)
+        self.wm_rotation.setSuffix("°")
+        self.wm_rotation.setToolTip("Rotate the watermark text around its centre")
+        text_layout.addRow("Rotation:", self.wm_rotation)
         layout.addWidget(self.text_group)
         
         # Image settings
@@ -1345,110 +1628,25 @@ class WatermarkDialog(QDialog):
         if path:
             self.wm_image_path.setText(path)
     
+    def accept(self):
+        """Validate the dialog before closing."""
+        if self.type_combo.currentText() == "Text" and not self.wm_text.text().strip():
+            QMessageBox.warning(self, "Watermark", "Please enter the watermark text.")
+            return
+        if self.type_combo.currentText() == "Image" and not self.wm_image_path.text():
+            QMessageBox.warning(self, "Watermark", "Please choose a watermark image.")
+            return
+        super().accept()
+
     def get_settings(self):
         return {
             "type": self.type_combo.currentText().lower(),
-            "text": self.wm_text.text(),
+            "text": self.wm_text.text().strip(),
             "fontsize": self.wm_fontsize.value(),
-            "color": (self.wm_color.redF(), self.wm_color.greenF(), self.wm_color.blueF(), self.wm_color.alphaF()),
+            "rotation": self.wm_rotation.value(),
+            "color": (self.wm_color.redF(), self.wm_color.greenF(), self.wm_color.blueF()),
             "image_path": self.wm_image_path.text() if self.type_combo.currentText() == "Image" else "",
-            "opacity": self.opacity_slider.value() / 255.0
-        }
-
-
-class WatermarkDialog(QDialog):
-    """Dialog for adding watermarks."""
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Add Watermark")
-        self.resize(400, 350)
-        
-        layout = QVBoxLayout(self)
-        
-        # Type
-        type_group = QGroupBox("Watermark Type")
-        type_layout = QVBoxLayout(type_group)
-        self.type_combo = QComboBox()
-        self.type_combo.addItems(["Text", "Image"])
-        self.type_combo.currentTextChanged.connect(self.on_type_changed)
-        type_layout.addWidget(self.type_combo)
-        layout.addWidget(type_group)
-        
-        # Text settings
-        self.text_group = QGroupBox("Text Watermark")
-        text_layout = QFormLayout(self.text_group)
-        self.wm_text = QLineEdit()
-        self.wm_text.setPlaceholderText("CONFIDENTIAL")
-        text_layout.addRow("Text:", self.wm_text)
-        
-        self.wm_fontsize = QSpinBox()
-        self.wm_fontsize.setRange(12, 200)
-        self.wm_fontsize.setValue(72)
-        text_layout.addRow("Font Size:", self.wm_fontsize)
-        
-        self.wm_color_btn = QPushButton("Choose Color")
-        self.wm_color_btn.clicked.connect(self.choose_wm_color)
-        self.wm_color = QColor(255, 0, 0, 128)
-        self.wm_color_btn.setStyleSheet("background-color: rgba(255,0,0,128);")
-        text_layout.addRow("Color:", self.wm_color_btn)
-        layout.addWidget(self.text_group)
-        
-        # Image settings
-        self.image_group = QGroupBox("Image Watermark")
-        image_layout = QFormLayout(self.image_group)
-        self.wm_image_path = QLineEdit()
-        self.wm_image_path.setReadOnly(True)
-        image_layout.addRow("Image:", self.wm_image_path)
-        
-        browse_btn = QPushButton("Browse...")
-        browse_btn.clicked.connect(self.browse_image)
-        image_layout.addRow("", browse_btn)
-        layout.addWidget(self.image_group)
-        
-        # Opacity
-        opacity_group = QGroupBox("Opacity")
-        opacity_layout = QVBoxLayout(opacity_group)
-        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
-        self.opacity_slider.setRange(0, 255)
-        self.opacity_slider.setValue(64)
-        self.opacity_label = QLabel("Opacity: 25%")
-        self.opacity_slider.valueChanged.connect(lambda v: self.opacity_label.setText(f"Opacity: {v*100//255}%"))
-        opacity_layout.addWidget(self.opacity_label)
-        opacity_layout.addWidget(self.opacity_slider)
-        layout.addWidget(opacity_group)
-        
-        self.on_type_changed(self.type_combo.currentText())
-        
-        # Buttons
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-    
-    def on_type_changed(self, text):
-        self.text_group.setVisible(text == "Text")
-        self.image_group.setVisible(text == "Image")
-    
-    def choose_wm_color(self):
-        color = QColorDialog.getColor(self.wm_color, self)
-        if color.isValid():
-            self.wm_color = color
-            self.wm_color_btn.setStyleSheet(f"background-color: {color.name()};")
-    
-    def browse_image(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Select Watermark Image", "", "Images (*.png *.jpg *.jpeg)")
-        if path:
-            self.wm_image_path.setText(path)
-    
-    def get_settings(self):
-        return {
-            "type": self.type_combo.currentText().lower(),
-            "text": self.wm_text.text(),
-            "fontsize": self.wm_fontsize.value(),
-            "color": (self.wm_color.redF(), self.wm_color.greenF(), self.wm_color.blueF(), self.wm_color.alphaF()),
-            "image_path": self.wm_image_path.text() if self.type_combo.currentText() == "Image" else "",
-            "opacity": self.opacity_slider.value() / 255.0
+            "opacity": max(0.05, self.opacity_slider.value() / 255.0),
         }
 
 
@@ -1597,9 +1795,15 @@ class BatchProcessDialog(QDialog):
     
     def get_settings(self):
         files = [self.files_list.item(i).text() for i in range(self.files_list.count())]
+        actions = {
+            "Compress": "compress",
+            "Flatten": "flatten",
+            "Remove Annotations": "remove_annotations",
+            "Add Page Numbers": "add_page_numbers",
+        }
         return {
             "files": files,
-            "action": self.action_combo.currentText().lower().replace(" ", "_")
+            "action": actions.get(self.action_combo.currentText(), "compress"),
         }
 
 
@@ -1608,8 +1812,9 @@ class ExportDialog(QDialog):
     
     def __init__(self, page_count: int, parent=None):
         super().__init__(parent)
+        self.page_count = page_count
         self.setWindowTitle("Export Pages as Images")
-        self.resize(400, 300)
+        self.resize(400, 320)
         
         layout = QVBoxLayout(self)
         
@@ -1641,12 +1846,21 @@ class ExportDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
     
+    def accept(self):
+        """Reject an invalid page range instead of failing later."""
+        try:
+            parse_page_range(self.page_range.text(), self.page_count)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Page Range", str(exc))
+            return
+        super().accept()
+
     def get_settings(self):
         return {
             "range": self.page_range.text(),
             "format": self.format_combo.currentText(),
             "dpi": self.dpi_spin.value(),
-            "quality": self.quality_spin.value()
+            "quality": self.quality_spin.value(),
         }
 
 
@@ -1696,10 +1910,14 @@ class DocumentPropertiesDialog(QDialog):
         adv_layout = QFormLayout(adv_widget)
         
         self.page_count_label = QLabel(str(doc.page_count))
-        self.page_size_label = QLabel(f"{doc[0].rect.width:.0f} x {doc[0].rect.height:.0f} pts" if doc.page_count > 0 else "N/A")
+        self.page_size_label = QLabel(
+            f"{doc[0].rect.width:.0f} x {doc[0].rect.height:.0f} pts"
+            if doc.page_count > 0
+            else "N/A"
+        )
         self.encrypted_label = QLabel("Yes" if doc.needs_pass else "No")
-        self.pdf_version_label = QLabel(str(doc.pdf_version()))
-        self.permissions_label = QLabel(str(doc.permissions) if hasattr(doc, 'permissions') else "N/A")
+        self.pdf_version_label = QLabel(pdf_version_string(doc))
+        self.permissions_label = QLabel(self._describe_permissions(doc))
         
         adv_layout.addRow("Pages:", self.page_count_label)
         adv_layout.addRow("Page Size:", self.page_size_label)
@@ -1718,10 +1936,8 @@ class DocumentPropertiesDialog(QDialog):
         self.custom_tree.setColumnWidth(0, 200)
         
         # Add existing custom metadata
-        for key, value in meta.items():
-            if key not in ["title", "author", "subject", "keywords", "creator", "producer", "creationDate", "modDate"]:
-                item = QTreeWidgetItem([key, str(value)])
-                self.custom_tree.addTopLevelItem(item)
+        for key, value in get_custom_metadata(doc).items():
+            self.custom_tree.addTopLevelItem(QTreeWidgetItem([key, str(value)]))
         
         custom_layout.addWidget(self.custom_tree)
         
@@ -1744,9 +1960,27 @@ class DocumentPropertiesDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Apply)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        buttons.button(QDialogButtonBox.StandardButton.Apply).clicked.connect(self.apply_changes)
+        apply_button = buttons.button(QDialogButtonBox.StandardButton.Apply)
+        if apply_button is not None:
+            apply_button.clicked.connect(self.apply_changes)
         layout.addWidget(buttons)
     
+    @staticmethod
+    def _describe_permissions(doc: fitz.Document) -> str:
+        """Return a readable summary of the permission bits."""
+        bits = [
+            (fitz.PDF_PERM_PRINT, "print"),  # type: ignore[attr-defined]
+            (fitz.PDF_PERM_MODIFY, "modify"),  # type: ignore[attr-defined]
+            (fitz.PDF_PERM_COPY, "copy"),  # type: ignore[attr-defined]
+            (fitz.PDF_PERM_ANNOTATE, "annotate"),  # type: ignore[attr-defined]
+            (fitz.PDF_PERM_FORM, "fill forms"),  # type: ignore[attr-defined]
+            (fitz.PDF_PERM_ACCESSIBILITY, "accessibility"),  # type: ignore[attr-defined]
+            (fitz.PDF_PERM_ASSEMBLE, "assemble"),  # type: ignore[attr-defined]
+            (fitz.PDF_PERM_PRINT_HQ, "print high quality"),  # type: ignore[attr-defined]
+        ]
+        allowed = [label for bit, label in bits if doc.permissions & bit]
+        return ", ".join(allowed) if allowed else "none"
+
     def _add_custom_metadata(self):
         key, ok = QInputDialog.getText(self, "Add Metadata", "Key:")
         if ok and key:
@@ -1760,6 +1994,7 @@ class DocumentPropertiesDialog(QDialog):
             self.custom_tree.takeTopLevelItem(self.custom_tree.indexOfTopLevelItem(item))
     
     def apply_changes(self):
+        """Write the dialog values back into the open document."""
         meta = self.doc.metadata
         meta["title"] = self.title_edit.text()
         meta["author"] = self.author_edit.text()
@@ -1767,13 +2002,17 @@ class DocumentPropertiesDialog(QDialog):
         meta["keywords"] = self.keywords_edit.text()
         meta["creator"] = self.creator_edit.text()
         meta["producer"] = self.producer_edit.text()
-        
-        # Update custom metadata
+        self.doc.set_metadata(meta)
+
+        # Custom keys live outside set_metadata()'s whitelist, so they are
+        # written through the info dictionary itself.
+        custom = {}
         for i in range(self.custom_tree.topLevelItemCount()):
             item = self.custom_tree.topLevelItem(i)
-            meta[item.text(0)] = item.text(1)
-        
-        self.doc.set_metadata(meta)
+            key = item.text(0).strip()
+            if key:
+                custom[key] = item.text(1)
+        set_custom_metadata(self.doc, custom)
     
     def accept(self):
         self.apply_changes()
@@ -1785,6 +2024,7 @@ class BatesNumberingDialog(QDialog):
     
     def __init__(self, page_count: int, parent=None):
         super().__init__(parent)
+        self.page_count = page_count
         self.setWindowTitle("Add Bates Numbering")
         self.resize(450, 400)
         
@@ -1826,7 +2066,7 @@ class BatesNumberingDialog(QDialog):
         self.position_combo.addItems(["Bottom Center", "Bottom Right", "Bottom Left", "Top Center", "Top Right", "Top Left"])
         form.addRow("Position:", self.position_combo)
         
-        self.page_range = QLineEdit(f"1-{self.parent().doc.page_count if self.parent() and hasattr(self.parent(), 'doc') else 0}")
+        self.page_range = QLineEdit(f"1-{page_count}")
         form.addRow("Page Range:", self.page_range)
         
         layout.addLayout(form)
@@ -1867,6 +2107,14 @@ class BatesNumberingDialog(QDialog):
         self.preview_label.setText(text)
         self.preview_label.setStyleSheet(f"font-size: 14px; padding: 20px; border: 1px dashed #ccc; color: {self.font_color.name()};")
     
+    def accept(self):
+        try:
+            parse_page_range(self.page_range.text(), self.page_count)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Page Range", str(exc))
+            return
+        super().accept()
+
     def get_settings(self):
         return {
             "prefix": self.prefix.text(),
@@ -1886,30 +2134,43 @@ class BatesNumberingDialog(QDialog):
 class PDFViewer(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PDF Editor")
+        self.setWindowTitle(APP_NAME)
         self.resize(1200, 800)
-        
-        self.doc: Optional[fitz.Document] = None
+
+        self.doc: fitz.Document | None = None
         self.current_page = 0
         self.zoom = 1.0
         self.dark_mode = False
         self.current_theme = "light"
         self.file_path = ""
-        self.recent_files = []
+        self.dirty = False
+        self.dark_action: QAction | None = None
+        self.recent_files: list[str] = []
         self.max_recent_files = 10
+        self.view_mode = "continuous"
+        self._search_term = ""
+        self._search_hits: list[tuple[int, fitz.Rect]] = []
+        self._search_index = -1
         self._load_recent_files()
         
         self._setup_ui()
-        self._setup_sidebar()
-        self._setup_toolbar()
         self._apply_theme()
     
+    def _update_window_title(self):
+        """Show the file name and a modified marker in the title bar."""
+        name = Path(self.file_path).name if self.file_path else "Untitled"
+        marker = "*" if self.dirty else ""
+        self.setWindowTitle(f"{marker}{name} - {APP_NAME}")
+
+    def _mark_dirty(self, dirty: bool = True):
+        self.dirty = dirty
+        self._update_window_title()
+
     def _setup_ui(self):
         # Menu bar (Acrobat-style)
         self._setup_menubar()
         
         # Main splitter for three-pane layout
-        from PyQt6.QtWidgets import QSplitter
         main_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.setCentralWidget(main_splitter)
         
@@ -1921,7 +2182,6 @@ class PDFViewer(QMainWindow):
         left_panel.setMinimumWidth(200)
         
         # Sidebar tabs
-        from PyQt6.QtWidgets import QTabWidget
         self.sidebar_tabs = QTabWidget()
         self.sidebar_tabs.setTabPosition(QTabWidget.TabPosition.West)
         
@@ -1985,7 +2245,8 @@ class PDFViewer(QMainWindow):
         # Status bar
         self._setup_statusbar()
         
-        # Connect scroll for lazy rendering
+        # Connect scroll for lazy rendering (once - render_pages() must not
+        # reconnect this on every reload, which stacked duplicate slots)
         self.scroll_area.verticalScrollBar().valueChanged.connect(self._on_scroll)
     
     def _setup_menubar(self):
@@ -2047,24 +2308,28 @@ class PDFViewer(QMainWindow):
         
         # Edit menu
         edit_menu = menubar.addMenu("&Edit")
-        undo_action = QAction("&Undo", self)
-        undo_action.setShortcut(QKeySequence.StandardKey.Undo)
-        edit_menu.addAction(undo_action)
-        
-        redo_action = QAction("&Redo", self)
-        redo_action.setShortcut(QKeySequence.StandardKey.Redo)
-        edit_menu.addAction(redo_action)
-        
-        edit_menu.addSeparator()
-        
+
         find_action = QAction("&Find...", self)
         find_action.setShortcut(QKeySequence.StandardKey.Find)
         find_action.triggered.connect(self.show_search)
         edit_menu.addAction(find_action)
-        
+
         find_next_action = QAction("Find &Next", self)
         find_next_action.setShortcut(QKeySequence("F3"))
+        find_next_action.triggered.connect(self.find_next)
         edit_menu.addAction(find_next_action)
+
+        replace_action = QAction("Search & Replace...", self)
+        replace_action.setShortcut(QKeySequence("Ctrl+H"))
+        replace_action.triggered.connect(self.search_and_replace)
+        edit_menu.addAction(replace_action)
+
+        edit_menu.addSeparator()
+
+        props_action = QAction("Document &Properties...", self)
+        props_action.setShortcut(QKeySequence("Ctrl+I"))
+        props_action.triggered.connect(self.show_document_properties)
+        edit_menu.addAction(props_action)
         
         # View menu
         view_menu = menubar.addMenu("&View")
@@ -2106,10 +2371,11 @@ class PDFViewer(QMainWindow):
         
         view_menu.addSeparator()
         
-        dark_action = QAction("&Dark Mode", self)
-        dark_action.setShortcut(QKeySequence("Ctrl+D"))
-        dark_action.triggered.connect(self.toggle_dark_mode)
-        view_menu.addAction(dark_action)
+        self.dark_action = QAction("&Dark Mode", self)
+        self.dark_action.setCheckable(True)
+        self.dark_action.setShortcut(QKeySequence("Ctrl+D"))
+        self.dark_action.toggled.connect(self.toggle_dark_mode)
+        view_menu.addAction(self.dark_action)
         
         theme_action = QAction("&Theme Selector...", self)
         theme_action.setShortcut(QKeySequence("Ctrl+T"))
@@ -2126,6 +2392,25 @@ class PDFViewer(QMainWindow):
         right_panel_action.triggered.connect(lambda: self.tools_panel.setVisible(True))
         view_menu.addAction(right_panel_action)
         
+        # Go menu / navigation shortcuts
+        go_menu = menubar.addMenu("&Go")
+        go_action = QAction("&Go to Page...", self)
+        go_action.setShortcut(QKeySequence("Ctrl+G"))
+        go_action.triggered.connect(self.go_to_page_dialog)
+        go_menu.addAction(go_action)
+
+        nav_actions = [
+            ("&Next Page", QKeySequence("PgDown"), self.next_page),
+            ("&Previous Page", QKeySequence("PgUp"), self.prev_page),
+            ("&First Page", QKeySequence("Home"), self.first_page),
+            ("&Last Page", QKeySequence("End"), self.last_page),
+        ]
+        for label, shortcut, slot in nav_actions:
+            action = QAction(label, self)
+            action.setShortcut(shortcut)
+            action.triggered.connect(slot)
+            go_menu.addAction(action)
+
         # Tools menu
         tools_menu = menubar.addMenu("&Tools")
         org_action = QAction("&Organize Pages", self)
@@ -2196,19 +2481,9 @@ class PDFViewer(QMainWindow):
         
         tools_menu.addSeparator()
         
-        props_action = QAction("Document &Properties...", self)
-        props_action.setShortcut(QKeySequence("Ctrl+I"))
-        props_action.triggered.connect(self.show_document_properties)
-        tools_menu.addAction(props_action)
-        
         bates_action = QAction("Add &Bates Numbering...", self)
         bates_action.triggered.connect(self.add_bates_numbering)
         tools_menu.addAction(bates_action)
-        
-        search_replace_action = QAction("Search & Replace...", self)
-        search_replace_action.setShortcut(QKeySequence("Ctrl+H"))
-        search_replace_action.triggered.connect(self.search_and_replace)
-        tools_menu.addAction(search_replace_action)
         
         shortcuts_action = QAction("Keyboard &Shortcuts...", self)
         shortcuts_action.setShortcut(QKeySequence("Ctrl+K"))
@@ -2247,14 +2522,6 @@ class PDFViewer(QMainWindow):
         self.zoom_label = QLabel("Zoom: 100%")
         self.statusBar().addPermanentWidget(self.zoom_label)
     
-    def _setup_sidebar(self):
-        """Sidebar is now part of the main splitter in _setup_ui"""
-        pass
-    
-    def _setup_toolbar(self):
-        """Main toolbar is replaced by menubar and document toolbar"""
-        pass
-    
     def _apply_theme(self):
         theme = self._get_theme(self.current_theme)
         self.setStyleSheet(theme)
@@ -2266,7 +2533,8 @@ class PDFViewer(QMainWindow):
                 if hasattr(widget, 'set_theme'):
                     widget.set_theme(self.current_theme)
     
-    def _get_theme(self, theme_name: str):
+    def _theme_colors(self, theme_name: str) -> dict:
+        """Return the colour dictionary for a theme."""
         themes = {
             "light": {
                 "window_bg": "#ffffff",
@@ -2470,8 +2738,11 @@ class PDFViewer(QMainWindow):
             },
         }
         
-        t = themes.get(theme_name, themes["light"])
-        return self._build_stylesheet(t)
+        return themes.get(theme_name, themes["light"])
+
+    def _get_theme(self, theme_name: str) -> str:
+        """Return the stylesheet for a theme."""
+        return self._build_stylesheet(self._theme_colors(theme_name))
     
     def _build_stylesheet(self, t):
         return f"""
@@ -2503,10 +2774,14 @@ class PDFViewer(QMainWindow):
         """
     
     def toggle_dark_mode(self, checked: bool):
+        """Switch between the light and dark themes (Ctrl+D)."""
         self.dark_mode = checked
         self.current_theme = "dark" if checked else "light"
         self._apply_theme()
-        self.dark_action.setChecked(checked)
+        if self.dark_action is not None and self.dark_action.isChecked() != checked:
+            self.dark_action.blockSignals(True)
+            self.dark_action.setChecked(checked)
+            self.dark_action.blockSignals(False)
     
     def show_theme_selector(self):
         """Show theme selector dialog."""
@@ -2532,26 +2807,21 @@ class PDFViewer(QMainWindow):
         for theme_id in themes:
             item = QListWidgetItem(theme_names[theme_id])
             item.setData(Qt.ItemDataRole.UserRole, theme_id)
-            
-            # Create a preview widget
-            preview = QWidget()
-            preview.setFixedHeight(48)
-            theme = self._get_theme(theme_id)
-            # Parse theme for preview colors (simplified)
-            if theme_id == "dark":
-                preview.setStyleSheet("background: #1e1e1e; border: 1px solid #444;")
-            elif theme_id == "blue":
-                preview.setStyleSheet("background: #f0f4f8; border: 1px solid #b0c4de;")
-            elif theme_id == "high_contrast":
-                preview.setStyleSheet("background: #000; border: 2px solid #ff0;")
-            elif theme_id == "sepia":
-                preview.setStyleSheet("background: #f4ecd8; border: 1px solid #c9b896;")
-            else:
-                preview.setStyleSheet("background: #fff; border: 1px solid #ccc;")
-            
-            item.setSizeHint(QSize(0, 56))
+            # Paint a small swatch from the theme colours so the entry text
+            # stays readable (a child widget would cover it).
+            colors = self._theme_colors(theme_id)
+            swatch = QPixmap(64, 40)
+            swatch.fill(QColor(colors["window_bg"]))
+            painter = QPainter(swatch)
+            painter.fillRect(6, 6, 52, 12, QColor(colors["menu_sel_bg"]))
+            painter.fillRect(6, 22, 40, 6, QColor(colors["toolbar_bg"]))
+            painter.setPen(QColor(colors["separator"]))
+            painter.drawRect(0, 0, 63, 39)
+            painter.end()
+
+            item.setIcon(QIcon(swatch))
+            item.setSizeHint(QSize(180, 48))
             theme_list.addItem(item)
-            theme_list.setItemWidget(item, preview)
         
         theme_list.setCurrentRow(themes.index(self.current_theme))
         layout.addWidget(QLabel("Select a theme:"))
@@ -2577,8 +2847,10 @@ class PDFViewer(QMainWindow):
             self.current_theme = theme_id
             self.dark_mode = (theme_id == "dark")
             self._apply_theme()
-            if hasattr(self, 'dark_action'):
+            if self.dark_action is not None:
+                self.dark_action.blockSignals(True)
                 self.dark_action.setChecked(self.dark_mode)
+                self.dark_action.blockSignals(False)
             dialog.accept()
     
     def open_file(self):
@@ -2631,39 +2903,91 @@ class PDFViewer(QMainWindow):
         self.update_recent_menu()
     
     def save_file(self):
-        if self.doc and self.file_path:
-            try:
-                self.doc.save(self.file_path, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
-                self.status_label.setText("Saved")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to save:\n{e}")
-    
-    def save_file_as(self):
-        if self.doc:
-            path, _ = QFileDialog.getSaveFileName(self, "Save PDF As", "", "PDF Files (*.pdf)")
-            if path:
-                try:
-                    self.doc.save(path)
-                    self.file_path = path
-                    self.status_label.setText(f"Saved: {Path(path).name}")
-                except Exception as e:
-                    QMessageBox.critical(self, "Error", f"Failed to save:\n{e}")
-    
-    def load_document(self, path: str):
+        """Save the current document, keeping the changes user made."""
+        if not self.doc:
+            return
+        if not self.file_path:
+            self.save_file_as()
+            return
         try:
-            if self.doc:
-                self.doc.close()
-            
-            self.doc = fitz.open(path)
-            self.current_page = 0
-            self.file_path = path
-            self.render_pages()
-            self.update_ui()
-            self.thumbnail_sidebar.update_thumbnails(self.doc)
-            self.status_label.setText(f"Loaded: {Path(path).name}")
-            self.add_recent_file(path)
+            try:
+                # Incremental saves keep the original file object intact, but
+                # only work while the document is still backed by that file.
+                self.doc.save(
+                    self.file_path, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP
+                )
+            except Exception:
+                # Documents that were rebuilt in memory (page reordering) or
+                # protected ones need a complete rewrite.
+                self.doc.save(
+                    self.file_path, garbage=3, deflate=True,
+                    encryption=fitz.PDF_ENCRYPT_KEEP,
+                )
+            self._mark_dirty(False)
+            self.status_label.setText("Saved")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save:\n{e}")
+
+    def save_file_as(self):
+        if not self.doc:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save PDF As", self.file_path or "", "PDF Files (*.pdf)"
+        )
+        if not path:
+            return
+        try:
+            self.doc.save(path, garbage=3, deflate=True)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save:\n{e}")
+            return
+        self.file_path = path
+        self._mark_dirty(False)
+        self.add_recent_file(path)
+        self.status_label.setText(f"Saved: {Path(path).name}")
+
+    def _confirm_discard_changes(self) -> bool:
+        """Return True when it is safe to replace the current document."""
+        if not (self.doc and self.dirty):
+            return True
+        answer = QMessageBox.question(
+            self,
+            "Unsaved Changes",
+            "The document has unsaved changes. Discard them?",
+            QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+        )
+        return answer == QMessageBox.StandardButton.Discard
+
+    def load_document(self, path: str):
+        if not self._confirm_discard_changes():
+            return
+        try:
+            doc = fitz.open(path)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to open PDF:\n{e}")
+            return
+
+        if doc.needs_pass:
+            password, ok = QInputDialog.getText(
+                self, "Password Required", "Enter the document password:",
+                QLineEdit.EchoMode.Password,
+            )
+            if not ok or not doc.authenticate(password):
+                doc.close()
+                QMessageBox.warning(self, "Wrong Password", "Could not open the document.")
+                return
+
+        if self.doc:
+            self.doc.close()
+        self.doc = doc
+        self.current_page = 0
+        self.file_path = path
+        self.render_pages()
+        self.update_ui()
+        self.thumbnail_sidebar.update_thumbnails(self.doc)
+        self._mark_dirty(False)
+        self.status_label.setText(f"Loaded: {Path(path).name}")
+        self.add_recent_file(path)
     
     def render_pages(self):
         # Clear existing pages
@@ -2686,10 +3010,7 @@ class PDFViewer(QMainWindow):
         # Update document toolbar
         if hasattr(self, 'doc_toolbar'):
             self.doc_toolbar.update_page_info(self.current_page + 1, len(self.doc))
-        
-        # Connect scroll handler for lazy rendering
-        self.scroll_area.verticalScrollBar().valueChanged.connect(self._on_scroll)
-        
+
         # Initial render of visible pages
         QTimer.singleShot(0, self._render_visible_pages)
     
@@ -2749,6 +3070,17 @@ class PDFViewer(QMainWindow):
             self.current_page = len(self.doc) - 1
             self.scroll_to_page()
     
+    def go_to_page_dialog(self):
+        """Ask for a page number and jump there (Ctrl+G)."""
+        if not self.doc:
+            return
+        page, ok = QInputDialog.getInt(
+            self, "Go to Page", f"Page (1-{len(self.doc)}):",
+            self.current_page + 1, 1, len(self.doc),
+        )
+        if ok:
+            self.go_to_page(page)
+
     def go_to_page(self, page: int):
         if self.doc and 1 <= page <= len(self.doc):
             self.current_page = page - 1
@@ -2765,29 +3097,26 @@ class PDFViewer(QMainWindow):
                 self.scroll_area.ensureWidgetVisible(widget)
     
     def reorder_pages(self, new_order: list):
-        """Reorder PDF pages based on thumbnail drag & drop."""
-        if not self.doc or len(new_order) != len(self.doc):
+        """Reorder PDF pages based on thumbnail drag & drop.
+
+        The reorder is applied in memory (never through a temporary file) so
+        the original file path and any unsaved edits are preserved.
+        """
+        if not self.doc or sorted(new_order) != list(range(len(self.doc))):
             return
-        
+
         try:
-            # Create new document with reordered pages
             new_doc = fitz.open()
             for old_index in new_order:
                 new_doc.insert_pdf(self.doc, from_page=old_index, to_page=old_index)
-            
-            # Save to temp file and reload
-            import tempfile
-            tmp_path = tempfile.mktemp(suffix=".pdf")
-            new_doc.save(tmp_path)
-            new_doc.close()
-            
-            # Reload document
-            current_page = self.current_page
-            self.load_document(tmp_path)
-            self.current_page = min(current_page, len(self.doc) - 1)
-            self.scroll_to_page()
-            
-            self.status_label.setText(f"Pages reordered")
+            self.doc.close()
+            self.doc = new_doc
+            self.current_page = min(self.current_page, len(self.doc) - 1)
+            self.render_pages()
+            self.update_ui()
+            self.thumbnail_sidebar.update_thumbnails(self.doc)
+            self._mark_dirty()
+            self.status_label.setText("Pages reordered")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to reorder pages:\n{e}")
     
@@ -2811,38 +3140,84 @@ class PDFViewer(QMainWindow):
         if hasattr(self, 'doc_toolbar'):
             self.doc_toolbar.update_zoom(self.zoom)
     
+    def _current_page_rect(self) -> fitz.Rect | None:
+        """Rect of the page currently shown, or None."""
+        if not self.doc or not len(self.doc):
+            return None
+        index = min(self.current_page, len(self.doc) - 1)
+        # rect is the *rotated* page rectangle, which is what the user sees
+        return self.doc[index].rect
+
     def set_zoom_fit_width(self):
-        if self.doc and self.pages_layout.count() > 0:
-            widget = self.pages_layout.itemAt(0).widget()
-            if widget and widget._pixmap:
-                viewport_width = self.scroll_area.viewport().width() - 40
-                page_width = widget._pixmap.width()
-                if page_width > 0:
-                    zoom = viewport_width / page_width
-                    self.set_zoom(zoom)
-    
+        rect = self._current_page_rect()
+        if rect is None or not rect.width:
+            return
+        viewport_width = max(self.scroll_area.viewport().width() - 40, 100)
+        self.set_zoom(max(0.1, min(viewport_width / rect.width, 5.0)))
+
     def set_zoom_fit_page(self):
-        if self.doc and self.pages_layout.count() > 0:
-            widget = self.pages_layout.itemAt(0).widget()
-            if widget and widget._pixmap:
-                viewport_width = self.scroll_area.viewport().width() - 40
-                viewport_height = self.scroll_area.viewport().height() - 40
-                page_width = widget._pixmap.width()
-                page_height = widget._pixmap.height()
-                if page_width > 0 and page_height > 0:
-                    zoom_w = viewport_width / page_width
-                    zoom_h = viewport_height / page_height
-                    zoom = min(zoom_w, zoom_h)
-                    self.set_zoom(zoom)
+        rect = self._current_page_rect()
+        if rect is None or not rect.width or not rect.height:
+            return
+        viewport_width = max(self.scroll_area.viewport().width() - 40, 100)
+        viewport_height = max(self.scroll_area.viewport().height() - 40, 100)
+        zoom = min(viewport_width / rect.width, viewport_height / rect.height)
+        self.set_zoom(max(0.1, min(zoom, 5.0)))
     
     def set_zoom_fit_visible(self):
         self.set_zoom_fit_page()
     
     def set_view_mode(self, mode):
-        # TODO: Implement view modes (single, continuous, two-page, etc.)
+        """Apply a simple page layout: single, continuous or two-page."""
+        self.view_mode = mode
+        total = self.pages_layout.count()
+        if not total:
+            self.status_label.setText(f"View mode: {mode}")
+            return
+
+        for i in range(total):
+            widget = self.pages_layout.itemAt(i).widget()
+            if widget is None:
+                continue
+            if mode == "single":
+                widget.setVisible(i == self.current_page)
+            elif mode == "two":
+                widget.setVisible(i in {self.current_page, self.current_page + 1})
+            else:  # continuous (default)
+                widget.setVisible(True)
+
+        if mode != "continuous":
+            self.scroll_to_page()
+        else:
+            self._render_visible_pages()
         self.status_label.setText(f"View mode: {mode}")
+
+    # Aliases used by the document toolbar buttons
+    def view_single(self):
+        self.set_view_mode("single")
+
+    def view_continuous(self):
+        self.set_view_mode("continuous")
+
+    def view_two(self):
+        self.set_view_mode("two")
+
+    def view_two_continuous(self):
+        self.set_view_mode("two")
+
+    def select_tool(self):
+        self.toggle_select(True)
+
+    def edit_text(self):
+        self.add_text()
+
+    def add_comment(self):
+        self.add_note()
+
+    def attach_file(self):
+        self.add_link()
     
-    def toggle_annotate(self, checked: bool):
+    def toggle_annotate(self, checked: bool = True):
         for i in range(self.pages_layout.count()):
             widget = self.pages_layout.itemAt(i).widget()
             if isinstance(widget, PDFPageWidget):
@@ -2853,7 +3228,7 @@ class PDFViewer(QMainWindow):
         else:
             self.status_label.setText("Ready")
     
-    def toggle_select(self, checked: bool):
+    def toggle_select(self, checked: bool = True):
         for i in range(self.pages_layout.count()):
             widget = self.pages_layout.itemAt(i).widget()
             if isinstance(widget, PDFPageWidget):
@@ -2865,160 +3240,236 @@ class PDFViewer(QMainWindow):
             self.status_label.setText("Ready")
     
     def on_annotation_added(self, page_num, annot_data):
+        self._mark_dirty()
         self.status_label.setText(f"Annotation added to page {page_num + 1}")
     
     def on_text_selected(self, page_num, text):
         self.status_label.setText(f"Text selected on page {page_num + 1}: {text[:50]}...")
     
+
     def show_search(self):
-        text, ok = QInputDialog.getText(self, "Find", "Search for:")
+        """Prompt for a search term and jump to the first match."""
+        text, ok = QInputDialog.getText(self, "Find", "Search for:", text=self._search_term)
         if ok and text:
             self.find_text(text)
-    
-    def find_text(self, text):
-        if not self.doc:
+
+    def find_text(self, text: str, start_at_current: bool = False):
+        """Collect every occurrence of *text* and jump to the first one."""
+        self._search_term = text
+        self._search_hits = []
+        if not self.doc or not text:
+            self.status_label.setText("Nothing to search")
             return
-        for i in range(len(self.doc)):
-            page = self.doc[i]
-            matches = page.search_for(text)
-            if matches:
-                self.current_page = i
-                self.scroll_to_page()
-                self.status_label.setText(f"Found '{text}' on page {i+1}")
-                return
-        self.status_label.setText(f"'{text}' not found")
-    
+
+        case_sensitive = bool(
+            getattr(self, "case_sensitive", None) and self.case_sensitive.isChecked()
+        )
+        for page_index in range(len(self.doc)):
+            page = self.doc[page_index]
+            for rect in page.search_for(text):
+                if case_sensitive and text not in page.get_text("text", clip=rect):
+                    continue
+                self._search_hits.append((page_index, rect))
+
+        if not self._search_hits:
+            self._search_index = -1
+            self.status_label.setText(f"'{text}' not found")
+            return
+
+        self._search_index = -1
+        if start_at_current:
+            for i, (page_index, _rect) in enumerate(self._search_hits):
+                if page_index >= self.current_page:
+                    self._search_index = i - 1
+                    break
+        self.find_next()
+
+    def find_next(self):
+        """Jump to the next occurrence of the last search term (F3)."""
+        if not self._search_hits:
+            self.show_search()
+            return
+        self._search_index = (self._search_index + 1) % len(self._search_hits)
+        page_index, rect = self._search_hits[self._search_index]
+        self.current_page = page_index
+        self.scroll_to_page()
+        widget = self.pages_layout.itemAt(page_index).widget()
+        if isinstance(widget, PDFPageWidget):
+            self.scroll_area.ensureVisible(
+                int(rect.x0 * self.zoom),
+                int(rect.y0 * self.zoom),
+                int(rect.width * self.zoom),
+                int(rect.height * self.zoom),
+            )
+        self.status_label.setText(
+            f"Match {self._search_index + 1} of {len(self._search_hits)} "
+            f"on page {page_index + 1}"
+        )
+
     def print_document(self):
+        """Render the document pages onto a printer."""
         if not self.doc:
             return
         from PyQt6.QtPrintSupport import QPrintDialog, QPrinter
+
         printer = QPrinter(QPrinter.PrinterMode.HighResolution)
         dialog = QPrintDialog(printer, self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            # Print via PDF rendering
-            self.status_label.setText("Printing...")
-    
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        painter = QPainter(printer)
+        try:
+            page_rect = printer.pageRect(QPrinter.Unit.DevicePixel)
+            for index in range(len(self.doc)):
+                if index:
+                    printer.newPage()
+                page = self.doc[index]
+                # Fit the PDF page into the printable area, preserving ratio
+                scale = min(
+                    page_rect.width() / page.rect.width,
+                    page_rect.height() / page.rect.height,
+                )
+                pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+                image = QImage(
+                    pix.samples,
+                    pix.width,
+                    pix.height,
+                    pix.stride,
+                    QImage.Format.Format_RGB888,
+                ).copy()
+                painter.drawImage(
+                    int(page_rect.x()),
+                    int(page_rect.y()),
+                    image,
+                )
+        except Exception as e:  # pragma: no cover - hardware dependent
+            QMessageBox.critical(self, "Print Error", f"Printing failed:\n{e}")
+        finally:
+            painter.end()
+        self.status_label.setText("Document sent to printer")
+
     def redact_tool(self):
-        self.status_label.setText("Redact tool - Select text to redact")
-        self.sidebar_tabs.setCurrentIndex(2)  # Comments tab
-        # TODO: Implement redaction
-    
+        """Enable the redaction tool on the page widgets."""
+        if not self.doc:
+            return
+        self.redact_mode = True
+        for i in range(self.pages_layout.count()):
+            widget = self.pages_layout.itemAt(i).widget()
+            if isinstance(widget, PDFPageWidget):
+                widget.set_redact_mode(True)
+        self.status_label.setText("Redact tool - drag over content, then save and apply")
+
     def prepare_form(self):
         if not self.doc:
             return
-        self.status_label.setText("Preparing form - Auto-detecting fields...")
-        # TODO: Implement form field detection
-    
+        fields = [
+            widget.field_name
+            for page in self.doc
+            for widget in (page.widgets() or [])
+            if widget.field_name
+        ]
+        if fields:
+            QMessageBox.information(
+                self,
+                "Existing Form Fields",
+                f"This document already has {len(fields)} form field(s):\n\n"
+                f"{', '.join(fields[:20])}",
+            )
+            self.status_label.setText(f"{len(fields)} form field(s) detected")
+        else:
+            QMessageBox.information(
+                self, "Prepare Form",
+                "No fillable form fields were found in this document.",
+            )
+            self.status_label.setText("No form fields detected")
+
     def show_about(self):
-        QMessageBox.about(self, "About PDF Editor", 
-            "PDF Editor v1.0\n\n"
+        QMessageBox.about(
+            self,
+            f"About {APP_NAME}",
+            f"{APP_NAME} v{APP_VERSION}\n\n"
             "A modern PDF viewer and editor built with PyQt6 and PyMuPDF.\n\n"
             "Features:\n"
-            "• View, annotate, and edit PDFs\n"
-            "• Organize pages (reorder, rotate, delete)\n"
-            "• Fill and sign forms\n"
-            "• Merge, split, and export PDFs\n"
-            "• Dark mode support\n\n"
-            "Built for cross-platform desktop.")
-    
+            "- View, annotate, and edit PDFs\n"
+            "- Organize pages (reorder, rotate, delete)\n"
+            "- Fill and sign forms\n"
+            "- Merge, split, and export PDFs\n"
+            "- Page numbers, watermarks, Bates numbering\n"
+            "- Protect / unlock documents\n"
+            "- Light, dark, blue, high-contrast and sepia themes\n\n"
+            "Built for cross-platform desktop.",
+        )
+
     def show_document_properties(self):
         if not self.doc:
             return
         dialog = DocumentPropertiesDialog(self.doc, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._mark_dirty()
             self.status_label.setText("Document properties updated")
-            if self.file_path:
-                try:
-                    self.doc.save(self.file_path, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
-                except:
-                    pass
-    
+
     def add_bates_numbering(self):
         if not self.doc:
             return
         dialog = BatesNumberingDialog(len(self.doc), self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            settings = dialog.get_settings()
-            
-            path, _ = QFileDialog.getSaveFileName(self, "Save Bates Numbered PDF", "", "PDF Files (*.pdf)")
-            if not path:
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        settings = dialog.get_settings()
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Bates Numbered PDF", "", "PDF Files (*.pdf)"
+        )
+        if not path:
+            return
+
+        try:
+            pages = parse_page_range(settings["page_range"], len(self.doc))
+            if not pages:
+                QMessageBox.warning(self, "Bates Numbering", "The page range is empty.")
                 return
-            
-            try:
-                page_range = settings["page_range"]
-                pages = []
-                for part in page_range.split(","):
-                    if "-" in part:
-                        start, end = map(int, part.split("-"))
-                        pages.extend(range(start - 1, end))
-                    else:
-                        pages.append(int(part) - 1)
-                
-                pages = [p for p in pages if 0 <= p < len(self.doc)]
-                
-                for i in pages:
-                    page = self.doc[i]
-                    page_num = settings["start_number"] + pages.index(i)
-                    num_str = str(page_num).zfill(settings["number_digits"])
-                    text = f"{settings['prefix']}{num_str}{settings['suffix']}"
-                    
-                    color = (settings["color"][0], settings["color"][1], settings["color"][2])
-                    
-                    rect = page.rect
-                    pos = settings["position"]
-                    if pos == "bottom_center":
-                        x = rect.width / 2 - 50
-                        y = rect.height - 30
-                    elif pos == "bottom_right":
-                        x = rect.width - 100
-                        y = rect.height - 30
-                    elif pos == "bottom_left":
-                        x = 30
-                        y = rect.height - 30
-                    elif pos == "top_center":
-                        x = rect.width / 2 - 50
-                        y = 30
-                    elif pos == "top_right":
-                        x = rect.width - 100
-                        y = 30
-                    else:
-                        x = 30
-                        y = 30
-                    
-                    page.insert_text((x, y), text, fontsize=settings["font_size"], 
-                                   fontname="helv", color=color)
-                
-                self.doc.save(path)
-                self.status_label.setText(f"Bates numbering applied: {Path(path).name}")
-                QMessageBox.information(self, "Success", "Bates numbering applied successfully.")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to apply Bates numbering:\n{e}")
-    
+
+            out_doc = clone_document(self.doc)
+            color = tuple(settings["color"][:3])
+            for number, index in enumerate(pages):
+                page = out_doc[index]
+                page_number = settings["start_number"] + number
+                num_str = str(page_number).zfill(settings["number_digits"])
+                text = f"{settings['prefix']}{num_str}{settings['suffix']}"
+                x, y = stamp_position(
+                    page.rect, settings["position"], settings["font_size"], text
+                )
+                page.insert_text(
+                    (x, y), text, fontsize=settings["font_size"], fontname="helv",
+                    color=color,
+                )
+            out_doc.save(path, garbage=3, deflate=True)
+            out_doc.close()
+            self.status_label.setText(f"Bates numbering applied: {Path(path).name}")
+            QMessageBox.information(self, "Success", f"Saved {Path(path).name}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to apply Bates numbering:\n{e}")
+
     def search_and_replace(self):
+        """Open the search & replace dialog."""
         if not self.doc:
             return
-        
+
         dialog = QDialog(self)
         dialog.setWindowTitle("Search and Replace")
-        dialog.resize(400, 200)
-        
+        dialog.resize(420, 220)
+
         layout = QVBoxLayout(dialog)
-        
         form = QFormLayout()
-        self.search_text = QLineEdit()
+        self.search_text = QLineEdit(self._search_term)
         form.addRow("Find:", self.search_text)
-        
         self.replace_text = QLineEdit()
         form.addRow("Replace with:", self.replace_text)
-        
         self.case_sensitive = QCheckBox("Case sensitive")
         form.addRow("", self.case_sensitive)
-        
         self.whole_words = QCheckBox("Whole words only")
         form.addRow("", self.whole_words)
-        
         layout.addLayout(form)
-        
+
         btn_layout = QHBoxLayout()
         find_btn = QPushButton("Find Next")
         find_btn.clicked.connect(lambda: self._find_next(dialog))
@@ -3028,46 +3479,108 @@ class PDFViewer(QMainWindow):
         replace_all_btn.clicked.connect(lambda: self._replace_all(dialog))
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(dialog.reject)
-        
-        btn_layout.addWidget(find_btn)
-        btn_layout.addWidget(replace_btn)
-        btn_layout.addWidget(replace_all_btn)
-        btn_layout.addWidget(close_btn)
+        for button in (find_btn, replace_btn, replace_all_btn, close_btn):
+            btn_layout.addWidget(button)
         layout.addLayout(btn_layout)
-        
+
         dialog.exec()
-    
-    def _find_next(self, dialog):
-        if not self.doc:
+
+    def _search_options(self) -> tuple[str, bool]:
+        """Return (needle, case_sensitive) from the search dialog widgets."""
+        needle = self.search_text.text() if hasattr(self, "search_text") else ""
+        case_sensitive = bool(
+            getattr(self, "case_sensitive", None) and self.case_sensitive.isChecked()
+        )
+        return needle, case_sensitive
+
+    def _find_next(self, dialog=None):
+        needle, _case_sensitive = self._search_options()
+        if not needle:
             return
-        text = self.search_text.text()
-        if not text:
+        if needle != self._search_term or not self._search_hits:
+            self.find_text(needle, start_at_current=True)
+        else:
+            self.find_next()
+
+    def _replace_in_page(self, page: fitz.Page, needle: str, replacement: str,
+                         case_sensitive: bool) -> int:
+        """Replace every occurrence of *needle* on one page.
+
+        PDF text is not editable, so the matched area is redacted and the
+        replacement is drawn in the same place with a matching font size.
+        """
+        hits = page.search_for(needle)
+        if case_sensitive:
+            hits = [
+                rect
+                for rect in hits
+                if needle in page.get_text("text", clip=rect)
+            ]
+        if not hits:
+            return 0
+        for rect in hits:
+            page.add_redact_annot(rect, fill=(1, 1, 1))
+        page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)  # type: ignore[attr-defined]
+        for rect in hits:
+            fontsize = max(6.0, min(rect.height * 0.8, 48.0))
+            page.insert_text(
+                (rect.x0, rect.y1 - rect.height * 0.2),
+                replacement,
+                fontsize=fontsize,
+                fontname="helv",
+                color=(0, 0, 0),
+            )
+        return len(hits)
+
+    def _replace_current(self, dialog=None):
+        needle, case_sensitive = self._search_options()
+        replacement = self.replace_text.text() if hasattr(self, "replace_text") else ""
+        if not needle or not self.doc:
             return
-        
-        for i in range(self.current_page, len(self.doc)):
-            page = self.doc[i]
-            matches = page.search_for(text)
-            if matches:
-                self.current_page = i
-                self.scroll_to_page()
-                self.status_label.setText(f"Found on page {i+1}")
-                return
-        
-        self.status_label.setText("Not found")
-    
-    def _replace_current(self, dialog):
-        self.status_label.setText("Replace current - not fully implemented")
-    
-    def _replace_all(self, dialog):
-        self.status_label.setText("Replace all - not fully implemented")
-    
+        if not self._search_hits:
+            self.find_text(needle)
+            return
+        page_index = self.current_page
+        page = self.doc[page_index]
+        hits = page.search_for(needle)
+        if case_sensitive:
+            hits = [rect for rect in hits if needle in page.get_text("text", clip=rect)]
+        if not hits:
+            self.status_label.setText(f"'{needle}' not found on this page")
+            return
+        rect = hits[0]
+        page.add_redact_annot(rect, fill=(1, 1, 1))
+        page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)  # type: ignore[attr-defined]
+        page.insert_text(
+            (rect.x0, rect.y1 - rect.height * 0.2),
+            replacement,
+            fontsize=max(6.0, min(rect.height * 0.8, 48.0)),
+            fontname="helv",
+        )
+        self._search_hits = []
+        self._mark_dirty()
+        self._refresh_after_page_edit(f"Replaced 1 occurrence on page {page_index + 1}")
+
+    def _replace_all(self, dialog=None):
+        needle, case_sensitive = self._search_options()
+        replacement = self.replace_text.text() if hasattr(self, "replace_text") else ""
+        if not needle or not self.doc:
+            return
+        total = 0
+        for page in self.doc:
+            total += self._replace_in_page(page, needle, replacement, case_sensitive)
+        self._search_hits = []
+        if total:
+            self._mark_dirty()
+            self._refresh_after_page_edit(f"Replaced {total} occurrence(s)")
+        else:
+            self.status_label.setText(f"'{needle}' not found")
     def show_shortcuts_dialog(self):
         dialog = QDialog(self)
         dialog.setWindowTitle("Keyboard Shortcuts")
         dialog.resize(500, 400)
-        
+
         layout = QVBoxLayout(dialog)
-        
         shortcuts = [
             ("File", [
                 ("Open", "Ctrl+O"),
@@ -3077,11 +3590,10 @@ class PDFViewer(QMainWindow):
                 ("Exit", "Ctrl+Q"),
             ]),
             ("Edit", [
-                ("Undo", "Ctrl+Z"),
-                ("Redo", "Ctrl+Y"),
                 ("Find", "Ctrl+F"),
                 ("Find Next", "F3"),
                 ("Search & Replace", "Ctrl+H"),
+                ("Document Properties", "Ctrl+I"),
             ]),
             ("View", [
                 ("Zoom In", "Ctrl++"),
@@ -3099,144 +3611,320 @@ class PDFViewer(QMainWindow):
                 ("Go to Page", "Ctrl+G"),
             ]),
             ("Tools", [
-                ("Select Tool", "V"),
-                ("Hand Tool", "H"),
-                ("Zoom Tool", "Z"),
                 ("Add Note", "N"),
-                ("Highlight", "Ctrl+Shift+H"),
+                ("Select / Highlight", "S"),
+                ("Fill & Sign", "F"),
+                ("Merge PDFs", "Ctrl+M"),
+                ("Export Pages", "Ctrl+E"),
+                ("Keyboard Shortcuts", "Ctrl+K"),
             ]),
         ]
-        
+
         tree = QTreeWidget()
         tree.setHeaderLabels(["Category", "Action", "Shortcut"])
         tree.setColumnWidth(0, 150)
         tree.setColumnWidth(1, 200)
-        
+
         for category, actions in shortcuts:
             cat_item = QTreeWidgetItem([category, "", ""])
-            cat_item.setFlags(cat_item.flags() | Qt.ItemFlag.ItemIsTristate)
             font = cat_item.font(0)
             font.setBold(True)
             cat_item.setFont(0, font)
-            
             for action, shortcut in actions:
-                item = QTreeWidgetItem(["", action, shortcut])
-                cat_item.addChild(item)
-            
+                cat_item.addChild(QTreeWidgetItem(["", action, shortcut]))
             tree.addTopLevelItem(cat_item)
-        
+
         tree.expandAll()
         layout.addWidget(tree)
-        
+
         btn_layout = QHBoxLayout()
-        reset_btn = QPushButton("Reset to Defaults")
-        reset_btn.clicked.connect(lambda: self.status_label.setText("Reset to defaults - not implemented"))
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(dialog.accept)
         btn_layout.addStretch()
-        btn_layout.addWidget(reset_btn)
         btn_layout.addWidget(close_btn)
         layout.addLayout(btn_layout)
-        
+
         dialog.exec()
-    
+    def _refresh_after_page_edit(self, message: str):
+        """Re-render after an in-memory page edit and flag the document."""
+        if not self.doc:
+            return
+        self.current_page = min(self.current_page, max(len(self.doc) - 1, 0))
+        self.render_pages()
+        self.update_ui()
+        self.thumbnail_sidebar.update_thumbnails(self.doc)
+        self.comments_sidebar.set_document(self.doc)
+        self._mark_dirty()
+        self.status_label.setText(message)
+
     def rotate_left(self):
         if not self.doc:
             return
         page = self.doc[self.current_page]
         page.set_rotation((page.rotation - 90) % 360)
-        self.render_pages()
-        self.status_label.setText("Page rotated left")
-    
+        self._refresh_after_page_edit("Page rotated left")
+
     def rotate_right(self):
         if not self.doc:
             return
         page = self.doc[self.current_page]
         page.set_rotation((page.rotation + 90) % 360)
-        self.render_pages()
-        self.status_label.setText("Page rotated right")
-    
+        self._refresh_after_page_edit("Page rotated right")
+
     def delete_page(self):
         if not self.doc or len(self.doc) <= 1:
+            QMessageBox.information(self, "Delete Page", "A document needs at least one page.")
             return
-        reply = QMessageBox.question(self, "Delete Page", 
+        reply = QMessageBox.question(
+            self, "Delete Page",
             f"Delete page {self.current_page + 1}?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
         if reply == QMessageBox.StandardButton.Yes:
             self.doc.delete_page(self.current_page)
-            self.load_document(self.file_path)
-            self.status_label.setText("Page deleted")
-    
+            self._refresh_after_page_edit("Page deleted")
+
     def insert_page(self):
         if not self.doc:
             return
-        self.doc.new_page(self.current_page)
-        self.load_document(self.file_path)
-        self.status_label.setText("Blank page inserted")
-    
+        self.doc.new_page(self.current_page + 1)
+        self._refresh_after_page_edit("Blank page inserted")
+
     def extract_pages(self):
         if not self.doc:
             return
-        # Use existing split_pdf functionality
+        # Splitting writes one PDF per page, which is exactly "extract pages"
         self.split_pdf()
     
     def add_text(self):
-        self.status_label.setText("Add text - Click on page to insert text box")
-        # TODO: Implement text insertion
-    
-    def add_image(self):
+        """Insert a line of text on the current page."""
         if not self.doc:
             return
-        path, _ = QFileDialog.getOpenFileName(self, "Insert Image", "", "Images (*.png *.jpg *.jpeg)")
-        if path:
-            self.status_label.setText(f"Image inserted: {Path(path).name}")
-            # TODO: Implement image insertion
-    
+        text, ok = QInputDialog.getText(self, "Add Text", "Text to insert:")
+        if not ok or not text.strip():
+            return
+        page = self.doc[self.current_page]
+        page.insert_text((72, 72), text.strip(), fontsize=12, fontname="helv")
+        self._refresh_after_page_edit("Text inserted")
+
+    def add_image(self):
+        """Insert an image, scaled to fit, in the middle of the current page."""
+        if not self.doc:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Insert Image", "", "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff)"
+        )
+        if not path:
+            return
+        try:
+            pix = fitz.Pixmap(path)
+            page = self.doc[self.current_page]
+            rect = page.rect
+            scale = min(rect.width / pix.width, rect.height / pix.height) * 0.8
+            width, height = pix.width * scale, pix.height * scale
+            centre = fitz.Point(rect.width / 2, rect.height / 2)
+            target = fitz.Rect(
+                centre.x - width / 2, centre.y - height / 2,
+                centre.x + width / 2, centre.y + height / 2,
+            )
+            page.insert_image(target, filename=path)
+            self._refresh_after_page_edit(f"Image inserted: {Path(path).name}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Could not insert the image:\n{e}")
+
     def add_link(self):
-        self.status_label.setText("Add link - Select area to create hyperlink")
-        # TODO: Implement link creation
-    
+        QMessageBox.information(
+            self, "Add Link",
+            "Hyperlink editing is not available yet.\n"
+            "Use the Select tool to copy text, or add links with a PDF authoring tool.",
+        )
+
     def crop_pages(self):
-        self.status_label.setText("Crop pages - Select area to crop")
-        # TODO: Implement cropping
-    
+        """Crop the margins of every page (in points)."""
+        if not self.doc:
+            return
+        dialog = CropDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        top, right, bottom, left = dialog.get_margins()
+        if top == right == bottom == left == 0:
+            return
+        try:
+            for page in self.doc:
+                # The crop box must stay inside the (unrotated) media box.
+                media = page.mediabox
+                if (
+                    media.width - left - right < 36
+                    or media.height - top - bottom < 36
+                ):
+                    raise ValueError("Margins are too large for this page size.")
+                page.set_cropbox(
+                    fitz.Rect(
+                        media.x0 + left,
+                        media.y0 + top,
+                        media.x1 - right,
+                        media.y1 - bottom,
+                    )
+                )
+            self._refresh_after_page_edit("Pages cropped")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to crop pages:\n{e}")
+
+    # ----- markup / drawing modes -------------------------------------
+
+    def _set_markup_mode(self, kind: str, message: str):
+        """Enable text selection with a fixed markup type on every page."""
+        for i in range(self.pages_layout.count()):
+            widget = self.pages_layout.itemAt(i).widget()
+            if isinstance(widget, PDFPageWidget):
+                widget.markup_kind = kind
+                widget.set_select_mode(True)
+        self.status_label.setText(message)
+
     def add_note(self):
         self.toggle_annotate(True)
         self.sidebar_tabs.setCurrentIndex(2)  # Comments tab
-    
+
     def highlight_text(self):
-        self.toggle_select(True)
-    
+        self._set_markup_mode("highlight", "Select text to highlight")
+
     def underline_text(self):
-        self.toggle_select(True)
-    
+        self._set_markup_mode("underline", "Select text to underline")
+
     def strikethrough(self):
-        self.status_label.setText("Strikethrough - Select text to strikethrough")
-        # TODO: Implement strikethrough
-    
+        self._set_markup_mode("strikeout", "Select text to strike through")
+
     def freehand_draw(self):
-        self.status_label.setText("Freehand draw - Draw on page")
-        # TODO: Implement freehand drawing
-    
+        for i in range(self.pages_layout.count()):
+            widget = self.pages_layout.itemAt(i).widget()
+            if isinstance(widget, PDFPageWidget):
+                widget.set_draw_mode(True)
+        self.status_label.setText("Freehand draw - drag on the page")
+
     def add_stamp(self):
-        self.status_label.setText("Add stamp - Select stamp type")
-        # TODO: Implement stamps
-    
+        """Choose a rubber stamp, then click on the page to place it."""
+        if not self.doc:
+            return
+        names = list(STAMP_TYPES)
+        stamp, ok = QInputDialog.getItem(
+            self, "Add Stamp", "Stamp type:", names, 0, editable=False
+        )
+        if not ok:
+            return
+        self._stamp_type = stamp
+        for i in range(self.pages_layout.count()):
+            widget = self.pages_layout.itemAt(i).widget()
+            if isinstance(widget, PDFPageWidget):
+                widget.stamp_type = stamp
+                widget.set_stamp_mode(True)
+        self.status_label.setText(f"Click on the page to place the '{stamp}' stamp")
+
+    # ----- form field creation ----------------------------------------
+
     def add_text_field(self):
-        self.status_label.setText("Add text field - Click to place field")
-        # TODO: Implement form field addition
-    
+        self._add_form_widget(fitz.PDF_WIDGET_TYPE_TEXT, "Text Field")  # type: ignore[attr-defined]
+
     def add_checkbox(self):
-        self.status_label.setText("Add checkbox - Click to place checkbox")
-        # TODO: Implement checkbox addition
-    
-    def add_signature(self):
-        self.status_label.setText("Add signature - Draw or import signature")
-        # TODO: Implement signature
-    
+        self._add_form_widget(fitz.PDF_WIDGET_TYPE_CHECKBOX, "Checkbox")  # type: ignore[attr-defined]
+
+    def _add_form_widget(self, field_type: int, label: str):
+        """Create a form field of ``field_type`` near the top of the page."""
+        if not self.doc:
+            return
+        name, ok = QInputDialog.getText(self, f"Add {label}", "Field name:")
+        if not ok or not name.strip():
+            return
+        try:
+            page = self.doc[self.current_page]
+            widget = fitz.Widget()
+            widget.field_type = field_type
+            widget.field_name = name.strip()
+            widget.field_label = name.strip()
+            if field_type == fitz.PDF_WIDGET_TYPE_CHECKBOX:  # type: ignore[attr-defined]
+                widget.rect = fitz.Rect(72, 72, 90, 90)
+                widget.field_value = False
+            else:
+                widget.rect = fitz.Rect(72, 72, 300, 96)
+                widget.field_value = ""
+                widget.text_fontsize = 10
+            page.add_widget(widget)
+            self._refresh_after_page_edit(f"{label} '{name.strip()}' added")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Could not add the field:\n{e}")
+
+    def add_dropdown(self):
+        """Create a combo box (dropdown) form field."""
+        if not self.doc:
+            return
+        name, ok = QInputDialog.getText(self, "Add Dropdown", "Field name:")
+        if not ok or not name.strip():
+            return
+        choices, ok = QInputDialog.getText(
+            self, "Add Dropdown", "Choices (comma separated):", text="Yes, No"
+        )
+        if not ok:
+            return
+        values = [value.strip() for value in choices.split(",") if value.strip()]
+        try:
+            page = self.doc[self.current_page]
+            widget = fitz.Widget()
+            widget.field_type = fitz.PDF_WIDGET_TYPE_COMBOBOX  # type: ignore[attr-defined]
+            widget.field_name = name.strip()
+            widget.field_label = name.strip()
+            widget.rect = fitz.Rect(72, 72, 250, 96)
+            widget.choice_values = values
+            widget.field_value = values[0] if values else ""
+            page.add_widget(widget)
+            self._refresh_after_page_edit(f"Dropdown '{name.strip()}' added")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Could not add the dropdown:\n{e}")
+
+    def add_radio_button(self):
+        """Create a radio button form field."""
+        if not self.doc:
+            return
+        name, ok = QInputDialog.getText(self, "Add Radio Button", "Group name:")
+        if not ok or not name.strip():
+            return
+        try:
+            page = self.doc[self.current_page]
+            widget = fitz.Widget()
+            widget.field_type = fitz.PDF_WIDGET_TYPE_RADIOBUTTON  # type: ignore[attr-defined]
+            widget.field_name = name.strip()
+            widget.field_label = name.strip()
+            widget.rect = fitz.Rect(72, 72, 90, 90)
+            widget.field_flags = fitz.PDF_BTN_FIELD_IS_RADIO  # type: ignore[attr-defined]
+            widget.field_value = "On"
+            page.add_widget(widget)
+            self._refresh_after_page_edit(f"Radio button '{name.strip()}' added")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Could not add the radio button:\n{e}")
+
+    def add_signature_field(self):
+        """Create an (unsigned) signature form field."""
+        if not self.doc:
+            return
+        name, ok = QInputDialog.getText(self, "Add Signature Field", "Field name:")
+        if not ok or not name.strip():
+            return
+        try:
+            page = self.doc[self.current_page]
+            widget = fitz.Widget()
+            widget.field_type = fitz.PDF_WIDGET_TYPE_SIGNATURE  # type: ignore[attr-defined]
+            widget.field_name = name.strip()
+            widget.field_label = name.strip()
+            widget.rect = fitz.Rect(72, 72, 260, 120)
+            page.add_widget(widget)
+            self._refresh_after_page_edit(f"Signature field '{name.strip()}' added")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Could not add the signature field:\n{e}")
+
     def sign_document(self):
-        self.status_label.setText("Sign document - Select certificate")
-        # TODO: Implement digital signing
+        QMessageBox.information(
+            self, "Digital Signature",
+            "Certificate based digital signing is not implemented yet.\n"
+            "You can add a signature image with the Insert Image tool.",
+        )
     
     def export_text(self):
         if not self.doc:
@@ -3251,10 +3939,12 @@ class PDFViewer(QMainWindow):
             self.status_label.setText(f"Text exported to {Path(path).name}")
     
     def export_word(self):
-        self.status_label.setText("Export to Word - Not yet implemented")
-    
+        """Alias of ``pdf_to_word`` used by the Export & Convert tool group."""
+        self.pdf_to_word()
+
     def export_excel(self):
-        self.status_label.setText("Export to Excel - Not yet implemented")
+        """Alias of ``pdf_to_excel`` used by the Export & Convert tool group."""
+        self.pdf_to_excel()
     
     def optimize_pdf(self):
         if not self.doc:
@@ -3271,28 +3961,39 @@ class PDFViewer(QMainWindow):
         # Extract form fields
         fields = []
         for page in self.doc:
-            for widget in page.widgets():
-                if widget.field_type_string in ('Text', 'Choice', 'Button'):
-                    fields.append({
-                        'name': widget.field_name,
-                        'type': 'text' if widget.field_type_string == 'Text' else 'checkbox' if widget.field_type_string == 'Button' else 'text',
-                        'value': widget.field_value
-                    })
-        
+            for widget in page.widgets() or []:
+                kind = widget.field_type_string
+                if kind == "CheckBox":
+                    field_type = "checkbox"
+                elif kind == "Text":
+                    field_type = "text"
+                else:
+                    field_type = "text"
+                fields.append(
+                    {
+                        "name": widget.field_name,
+                        "type": field_type,
+                        "value": widget.field_value,
+                    }
+                )
+
         if not fields:
             QMessageBox.information(self, "No Forms", "This PDF has no fillable form fields.")
             return
-        
+
         dialog = FormFieldDialog(fields, self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            values = dialog.get_values()
-            for page in self.doc:
-                for widget in page.widgets():
-                    if widget.field_name in values:
-                        widget.field_value = values[widget.field_name]
-                        widget.update()
-            self.render_pages()
-            self.status_label.setText("Form fields updated")
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        values = dialog.get_values()
+        for page in self.doc:
+            for widget in page.widgets() or []:
+                if widget.field_name in values:
+                    widget.field_value = values[widget.field_name]
+                    widget.update()
+        self._mark_dirty()
+        self.render_pages()
+        self.status_label.setText("Form fields updated")
     
     def merge_pdfs(self):
         dialog = MergeSplitDialog(self)
@@ -3318,79 +4019,99 @@ class PDFViewer(QMainWindow):
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to merge PDFs:\n{e}")
     
+
     def split_pdf(self):
+        """Write every page of the document to its own PDF file."""
         if not self.doc:
             return
-        
+
         if len(self.doc) < 2:
             QMessageBox.information(self, "Split", "PDF has only 1 page, nothing to split.")
             return
-        
-        # Simple split: each page as separate file
-        path, _ = QFileDialog.getExistingDirectory(self, "Select Output Folder")
-        if path:
-            try:
-                for i in range(len(self.doc)):
-                    single = fitz.open()
-                    single.insert_pdf(self.doc, from_page=i, to_page=i)
-                    single.save(Path(path) / f"page_{i+1}.pdf")
-                    single.close()
-                self.status_label.setText(f"Split into {len(self.doc)} files in {path}")
-                QMessageBox.information(self, "Done", f"Split complete! {len(self.doc)} files created.")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to split PDF:\n{e}")
-    
+
+        # getExistingDirectory returns a single string - unpacking it into
+        # (path, filter) was the reason splitting always failed.
+        output_dir = QFileDialog.getExistingDirectory(self, "Select Output Folder")
+        if not output_dir:
+            return
+
+        stem = Path(self.file_path).stem if self.file_path else "page"
+        try:
+            for i in range(len(self.doc)):
+                single = fitz.open()
+                single.insert_pdf(self.doc, from_page=i, to_page=i)
+                single.save(str(Path(output_dir) / f"{stem}_{i + 1}.pdf"))
+                single.close()
+            self.status_label.setText(f"Split into {len(self.doc)} files in {output_dir}")
+            QMessageBox.information(
+                self, "Done", f"Split complete! {len(self.doc)} files created."
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to split PDF:\n{e}")
+
     def export_images(self):
+        """Export the selected pages as PNG / JPEG / TIFF / BMP images."""
         if not self.doc:
             return
-        
+
         dialog = ExportDialog(len(self.doc), self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            settings = dialog.get_settings()
-            
-            # Parse page range
-            page_range = settings["range"]
-            pages = []
-            for part in page_range.split(","):
-                if "-" in part:
-                    start, end = map(int, part.split("-"))
-                    pages.extend(range(start - 1, end))
-                else:
-                    pages.append(int(part) - 1)
-            
-            # Filter valid pages
-            pages = [p for p in pages if 0 <= p < len(self.doc)]
-            
-            if not pages:
-                return
-            
-            output_dir = QFileDialog.getExistingDirectory(self, "Select Output Folder")
-            if not output_dir:
-                return
-            
-            try:
-                fmt = settings["format"].lower()
-                dpi = settings["dpi"]
-                mat = fitz.Matrix(dpi / 72, dpi / 72)
-                
-                for i in pages:
-                    page = self.doc[i]
-                    pix = page.get_pixmap(matrix=mat, alpha=False)
-                    output_path = Path(output_dir) / f"page_{i+1}.{fmt}"
-                    pix.save(str(output_path))
-                
-                self.status_label.setText(f"Exported {len(pages)} pages to {output_dir}")
-                QMessageBox.information(self, "Done", f"Exported {len(pages)} pages as {fmt.upper()}")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to export:\n{e}")
-    
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        settings = dialog.get_settings()
+
+        try:
+            pages = parse_page_range(settings["range"], len(self.doc))
+        except ValueError as exc:
+            QMessageBox.warning(self, "Page Range", str(exc))
+            return
+        if not pages:
+            QMessageBox.warning(self, "Page Range", "No valid pages selected.")
+            return
+
+        output_dir = QFileDialog.getExistingDirectory(self, "Select Output Folder")
+        if not output_dir:
+            return
+
+        fmt = settings["format"].lower()
+        extension = {"jpeg": "jpg", "tif": "tiff"}.get(fmt, fmt)
+        scale = settings["dpi"] / 72.0
+        try:
+            for i in pages:
+                page = self.doc[i]
+                pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+                output_path = Path(output_dir) / f"page_{i + 1}.{extension}"
+                save_pixmap(pix, output_path, extension, settings.get("quality", 90))
+            self.status_label.setText(f"Exported {len(pages)} pages to {output_dir}")
+            QMessageBox.information(
+                self, "Done", f"Exported {len(pages)} pages as {settings['format']}"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to export:\n{e}")
     def closeEvent(self, event):
+        """Ask before throwing away unsaved changes."""
+        if self.doc and self.dirty:
+            answer = QMessageBox.question(
+                self,
+                "Unsaved Changes",
+                "The document has unsaved changes. Save before closing?",
+                QMessageBox.StandardButton.Save
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel,
+            )
+            if answer == QMessageBox.StandardButton.Cancel:
+                event.ignore()
+                return
+            if answer == QMessageBox.StandardButton.Save:
+                self.save_file()
+                if self.dirty:  # save failed or was cancelled
+                    event.ignore()
+                    return
         if self.doc:
             self.doc.close()
         event.accept()
     
-    # ============ NEW PDF24-LIKE FEATURES ============
-    
+    # ----- protect / secure / convert -------------------------------
+
     def protect_pdf(self):
         """Add password protection to PDF."""
         if not self.doc:
@@ -3399,16 +4120,36 @@ class PDFViewer(QMainWindow):
         dialog = PasswordDialog(self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             user_pwd, owner_pwd, permissions = dialog.get_passwords()
-            
-            path, _ = QFileDialog.getSaveFileName(self, "Save Protected PDF", "", "PDF Files (*.pdf)")
-            if path:
-                try:
-                    self.doc.save(path, encryption=fitz.PDF_ENCRYPT_AES_256, 
-                                user_pw=user_pwd, owner_pw=owner_pwd, permissions=permissions)
-                    self.status_label.setText(f"PDF protected: {Path(path).name}")
-                    QMessageBox.information(self, "Success", "PDF has been password protected.")
-                except Exception as e:
-                    QMessageBox.critical(self, "Error", f"Failed to protect PDF:\n{e}")
+            if user_pwd is None and owner_pwd is None:
+                QMessageBox.warning(
+                    self, "Protect PDF",
+                    "Enter a user and/or owner password before saving.",
+                )
+                return
+            if user_pwd is None:
+                QMessageBox.warning(
+                    self, "Protect PDF",
+                    "A user password is required so the document can be opened.",
+                )
+                return
+
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Save Protected PDF", "", "PDF Files (*.pdf)"
+            )
+            if not path:
+                return
+            try:
+                self.doc.save(
+                    path,
+                    encryption=fitz.PDF_ENCRYPT_AES_256,
+                    user_pw=user_pwd,
+                    owner_pw=owner_pwd or user_pwd,
+                    permissions=permissions,
+                )
+                self.status_label.setText(f"PDF protected: {Path(path).name}")
+                QMessageBox.information(self, "Success", f"Saved {Path(path).name}")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to protect PDF:\n{e}")
     
     def unlock_pdf(self):
         """Remove password protection from PDF."""
@@ -3423,125 +4164,147 @@ class PDFViewer(QMainWindow):
         if ok and password:
             try:
                 if self.doc.authenticate(password):
-                    path, _ = QFileDialog.getSaveFileName(self, "Save Unlocked PDF", "", "PDF Files (*.pdf)")
+                    path, _ = QFileDialog.getSaveFileName(
+                        self, "Save Unlocked PDF", "", "PDF Files (*.pdf)"
+                    )
                     if path:
-                        self.doc.save(path, encryption=fitz.PDF_ENCRYPT_KEEP)
+                        # PDF_ENCRYPT_NONE removes the protection entirely
+                        self.doc.save(path, encryption=fitz.PDF_ENCRYPT_NONE)
                         self.status_label.setText(f"PDF unlocked: {Path(path).name}")
-                        QMessageBox.information(self, "Success", "PDF has been unlocked.")
+                        QMessageBox.information(self, "Success", f"Saved {Path(path).name}")
                 else:
                     QMessageBox.warning(self, "Wrong Password", "Incorrect password.")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to unlock PDF:\n{e}")
     
+
     def add_page_numbers(self):
-        """Add page numbers to PDF."""
+        """Write a numbered copy of the document ("Page 3 of 10" and so on)."""
         if not self.doc:
             return
-        
+
         dialog = PageNumberDialog(self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            settings = dialog.get_settings()
-            
-            path, _ = QFileDialog.getSaveFileName(self, "Save PDF with Page Numbers", "", "PDF Files (*.pdf)")
-            if path:
-                try:
-                    for i in range(len(self.doc)):
-                        page = self.doc[i]
-                        page_num = i + 1
-                        
-                        # Format page number
-                        if settings["prefix"]:
-                            text = f"{settings['prefix']} {page_num}"
-                        else:
-                            text = str(page_num)
-                        if settings["suffix"]:
-                            text += f" {settings['suffix']}"
-                        
-                        # Calculate position
-                        rect = page.rect
-                        if settings["position"] == "bottom_center":
-                            x = rect.width / 2 - 30
-                            y = rect.height - 30
-                        elif settings["position"] == "bottom_right":
-                            x = rect.width - 60
-                            y = rect.height - 30
-                        elif settings["position"] == "bottom_left":
-                            x = 30
-                            y = rect.height - 30
-                        elif settings["position"] == "top_center":
-                            x = rect.width / 2 - 30
-                            y = 30
-                        elif settings["position"] == "top_right":
-                            x = rect.width - 60
-                            y = 30
-                        else:  # top_left
-                            x = 30
-                            y = 30
-                        
-                        # Insert page number
-                        page.insert_text((x, y), text, fontsize=settings["fontsize"], 
-                                       fontname="helv", color=settings["color"])
-                    
-                    self.doc.save(path)
-                    self.status_label.setText(f"Page numbers added: {Path(path).name}")
-                    QMessageBox.information(self, "Success", "Page numbers have been added.")
-                except Exception as e:
-                    QMessageBox.critical(self, "Error", f"Failed to add page numbers:\n{e}")
-    
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        settings = dialog.get_settings()
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save PDF with Page Numbers", "", "PDF Files (*.pdf)"
+        )
+        if not path:
+            return
+
+        try:
+            out_doc = clone_document(self.doc)
+            total = len(out_doc)
+            for i in range(total):
+                page = out_doc[i]
+                suffix = settings["suffix"].replace("{total}", str(total))
+                text = " ".join(
+                    part for part in (settings["prefix"].strip(), str(i + 1), suffix.strip())
+                    if part
+                )
+                x, y = stamp_position(
+                    page.rect, settings["position"], settings["fontsize"], text
+                )
+                page.insert_text(
+                    (x, y), text, fontsize=settings["fontsize"], fontname="helv",
+                    color=settings["color"],
+                )
+            out_doc.save(path, garbage=3, deflate=True)
+            out_doc.close()
+            self.status_label.setText(f"Page numbers added: {Path(path).name}")
+            QMessageBox.information(self, "Success", f"Saved {Path(path).name}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to add page numbers:\n{e}")
+
+    def _watermarked_copy(self, settings: dict) -> fitz.Document:
+        """Return a copy of the document with the requested watermark applied."""
+        if not self.doc:
+            raise ValueError("No document is open")
+        out_doc = clone_document(self.doc)
+        opacity = float(settings.get("opacity", 0.25))
+        color = tuple(settings.get("color", (1.0, 0.0, 0.0))[:3])
+        fontsize = float(settings.get("fontsize", 72))
+        text = settings.get("text", "")
+        rotation = float(settings.get("rotation", 45))
+
+        for index in range(out_doc.page_count):
+            page = out_doc[index]
+            rect = page.rect
+            if settings.get("type") == "text":
+                if not text:
+                    continue
+                font = fitz.Font("helv")
+                writer = fitz.TextWriter(rect, color=color, opacity=opacity)
+                width = font.text_length(text, fontsize=fontsize)
+                start = fitz.Point(
+                    (rect.width - width) / 2, rect.height / 2 + fontsize / 3
+                )
+                writer.append(start, text, font=font, fontsize=fontsize)
+                # insert_text() only accepts multiples of 90 degrees, so the
+                # rotation is applied through a morph matrix around the centre.
+                writer.write_text(
+                    page,
+                    morph=(fitz.Point(rect.width / 2, rect.height / 2),
+                           fitz.Matrix(-rotation)),
+                )
+            elif settings.get("type") == "image" and settings.get("image_path"):
+                img_rect = fitz.Rect(
+                    rect.width / 4, rect.height / 4, rect.width * 3 / 4, rect.height * 3 / 4
+                )
+                page.insert_image(
+                    img_rect,
+                    pixmap=load_translucent_pixmap(settings["image_path"], opacity),
+                    overlay=True,
+                )
+        return out_doc
+
     def add_watermark(self):
-        """Add text or image watermark to PDF."""
+        """Add a text or image watermark to a copy of the document."""
         if not self.doc:
             return
-        
+
         dialog = WatermarkDialog(self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            settings = dialog.get_settings()
-            
-            path, _ = QFileDialog.getSaveFileName(self, "Save Watermarked PDF", "", "PDF Files (*.pdf)")
-            if path:
-                try:
-                    for i in range(len(self.doc)):
-                        page = self.doc[i]
-                        rect = page.rect
-                        
-                        if settings["type"] == "text":
-                            # Add text watermark (diagonal)
-                            page.insert_text((rect.width/2, rect.height/2), settings["text"],
-                                           fontsize=settings["fontsize"], fontname="helv",
-                                           color=settings["color"], opacity=settings["opacity"],
-                                           rotate=45, overlay=True)
-                        elif settings["type"] == "image" and settings["image_path"]:
-                            # Add image watermark
-                            img_rect = fitz.Rect(rect.width/4, rect.height/4, 
-                                               rect.width*3/4, rect.height*3/4)
-                            page.insert_image(img_rect, filename=settings["image_path"],
-                                            opacity=settings["opacity"], overlay=True)
-                    
-                    self.doc.save(path)
-                    self.status_label.setText(f"Watermark added: {Path(path).name}")
-                    QMessageBox.information(self, "Success", "Watermark has been added.")
-                except Exception as e:
-                    QMessageBox.critical(self, "Error", f"Failed to add watermark:\n{e}")
-    
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        settings = dialog.get_settings()
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Watermarked PDF", "", "PDF Files (*.pdf)"
+        )
+        if not path:
+            return
+
+        try:
+            out_doc = self._watermarked_copy(settings)
+            out_doc.save(path, garbage=3, deflate=True)
+            out_doc.close()
+            self.status_label.setText(f"Watermark added: {Path(path).name}")
+            QMessageBox.information(self, "Success", f"Saved {Path(path).name}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to add watermark:\n{e}")
+
     def flatten_pdf(self):
-        """Flatten PDF (merge annotations into page content)."""
+        """Bake annotations, form fields and stamps into the page content."""
         if not self.doc:
             return
-        
-        path, _ = QFileDialog.getSaveFileName(self, "Save Flattened PDF", "", "PDF Files (*.pdf)")
-        if path:
-            try:
-                # Flatten by saving with no incremental and no annotations
-                for page in self.doc:
-                    # This will flatten annotations into the page
-                    pass
-                
-                self.doc.save(path, garbage=4, deflate=True, clean=True)
-                self.status_label.setText(f"PDF flattened: {Path(path).name}")
-                QMessageBox.information(self, "Success", "PDF has been flattened (annotations merged).")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to flatten PDF:\n{e}")
-    
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Flattened PDF", "", "PDF Files (*.pdf)"
+        )
+        if not path:
+            return
+
+        try:
+            out_doc = clone_document(self.doc)
+            out_doc.bake()  # merges annotations + widgets into the page content
+            out_doc.save(path, garbage=4, deflate=True, clean=True)
+            out_doc.close()
+            self.status_label.setText(f"PDF flattened: {Path(path).name}")
+            QMessageBox.information(self, "Success", f"Saved {Path(path).name}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to flatten PDF:\n{e}")
     def extract_images_from_pdf(self):
         """Extract all images from PDF."""
         if not self.doc:
@@ -3576,38 +4339,48 @@ class PDFViewer(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to extract images:\n{e}")
     
+
     def compress_pdf_advanced(self):
-        """Advanced PDF compression with options."""
+        """Save a compressed copy of the document."""
         if not self.doc:
             return
-        
+
         dialog = CompressDialog(self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            settings = dialog.get_settings()
-            
-            path, _ = QFileDialog.getSaveFileName(self, "Save Compressed PDF", "", "PDF Files (*.pdf)")
-            if path:
-                try:
-                    # Apply compression settings
-                    self.doc.save(path, 
-                                garbage=settings["garbage"],
-                                deflate=settings["deflate"],
-                                clean=settings["clean"],
-                                deflate_images=settings["deflate_images"],
-                                deflate_fonts=settings["deflate_fonts"])
-                    
-                    original_size = os.path.getsize(self.file_path) if self.file_path else 0
-                    new_size = os.path.getsize(path)
-                    reduction = (1 - new_size / original_size) * 100 if original_size > 0 else 0
-                    
-                    self.status_label.setText(f"Compressed: {reduction:.1f}% reduction")
-                    QMessageBox.information(self, "Done", 
-                        f"Original: {original_size/1024:.1f} KB\n"
-                        f"Compressed: {new_size/1024:.1f} KB\n"
-                        f"Reduction: {reduction:.1f}%")
-                except Exception as e:
-                    QMessageBox.critical(self, "Error", f"Failed to compress PDF:\n{e}")
-    
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        settings = dialog.get_settings()
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Compressed PDF", "", "PDF Files (*.pdf)"
+        )
+        if not path:
+            return
+
+        try:
+            out_doc = clone_document(self.doc)
+            out_doc.save(
+                path,
+                garbage=settings["garbage"],
+                deflate=settings["deflate"],
+                clean=settings["clean"],
+                deflate_images=settings["deflate_images"],
+                deflate_fonts=settings["deflate_fonts"],
+            )
+            out_doc.close()
+
+            original_size = os.path.getsize(self.file_path) if self.file_path else 0
+            new_size = os.path.getsize(path)
+            reduction = (1 - new_size / original_size) * 100 if original_size else 0
+
+            self.status_label.setText(f"Compressed: {reduction:.1f}% reduction")
+            QMessageBox.information(
+                self, "Done",
+                f"Original: {original_size / 1024:.1f} KB\n"
+                f"Compressed: {new_size / 1024:.1f} KB\n"
+                f"Reduction: {reduction:.1f}%",
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to compress PDF:\n{e}")
     def compare_pdfs(self):
         """Compare two PDFs visually."""
         if not self.doc:
@@ -3641,85 +4414,111 @@ class PDFViewer(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to compare PDFs:\n{e}")
     
+
     def batch_process(self):
-        """Batch process multiple PDFs."""
+        """Apply one action to a list of files."""
         dialog = BatchProcessDialog(self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            settings = dialog.get_settings()
-            
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        settings = dialog.get_settings()
+        files = settings["files"]
+        if not files:
+            QMessageBox.information(self, "Batch", "No files selected.")
+            return
+
+        action = settings["action"]
+        processed = 0
+        errors: list[str] = []
+        for file_path in files:
             try:
-                for file_path in settings["files"]:
-                    doc = fitz.open(file_path)
-                    
-                    if settings["action"] == "compress":
-                        out_path = str(Path(file_path).parent / f"compressed_{Path(file_path).name}")
-                        doc.save(out_path, garbage=4, deflate=True, clean=True)
-                    elif settings["action"] == "flatten":
-                        out_path = str(Path(file_path).parent / f"flattened_{Path(file_path).name}")
-                        doc.save(out_path, garbage=4, deflate=True, clean=True)
-                    elif settings["action"] == "remove_annotations":
-                        out_path = str(Path(file_path).parent / f"no_annots_{Path(file_path).name}")
-                        for page in doc:
-                            for annot in page.annots():
-                                page.delete_annot(annot)
-                        doc.save(out_path)
-                    elif settings["action"] == "add_pagenums":
-                        out_path = str(Path(file_path).parent / f"paged_{Path(file_path).name}")
-                        for i, page in enumerate(doc):
-                            page.insert_text((30, 30), str(i+1), fontsize=10)
-                        doc.save(out_path)
-                    
-                    doc.close()
-                
-                self.status_label.setText(f"Batch processed {len(settings['files'])} files")
-                QMessageBox.information(self, "Done", f"Batch processing complete for {len(settings['files'])} files.")
-                
+                doc = fitz.open(file_path)
+                source = Path(file_path)
+                if action == "compress":
+                    out_path = source.with_name(f"compressed_{source.name}")
+                    doc.save(str(out_path), garbage=4, deflate=True, clean=True)
+                elif action == "flatten":
+                    out_path = source.with_name(f"flattened_{source.name}")
+                    doc.bake()
+                    doc.save(str(out_path), garbage=4, deflate=True, clean=True)
+                elif action == "remove_annotations":
+                    out_path = source.with_name(f"no_annots_{source.name}")
+                    for page in doc:
+                        for annot in page.annots() or []:
+                            page.delete_annot(annot)
+                    doc.save(str(out_path))
+                elif action == "add_page_numbers":
+                    out_path = source.with_name(f"paged_{source.name}")
+                    for i, page in enumerate(doc):
+                        x, y = stamp_position(page.rect, "bottom_center", 10, str(i + 1))
+                        page.insert_text((x, y), str(i + 1), fontsize=10)
+                    doc.save(str(out_path), garbage=3, deflate=True)
+                doc.close()
+                processed += 1
             except Exception as e:
-                QMessageBox.critical(self, "Error", f"Batch processing failed:\n{e}")
+                errors.append(f"{Path(file_path).name}: {e}")
 
+        self.status_label.setText(f"Batch processed {processed}/{len(files)} files")
+        if errors:
+            QMessageBox.warning(
+                self, "Batch Processing",
+                f"Processed {processed} of {len(files)} files.\n\n"
+                + "\n".join(errors[:10]),
+            )
+        else:
+            QMessageBox.information(
+                self, "Done", f"Batch processing complete for {processed} files."
+            )
 
-# ============ NEW FEATURES ============
-    
     def ocr_pdf(self):
-        """OCR (Text Recognition) for scanned PDFs using Tesseract."""
+        """Add an invisible OCR text layer to scanned pages (needs Tesseract)."""
         if not self.doc:
             return
-        
+
         try:
             import pytesseract
+            from PIL import Image
         except ImportError:
-            QMessageBox.warning(self, "OCR Not Available", 
-                "pytesseract not installed. Run: pip install pytesseract\n"
-                "Also install Tesseract OCR: https://github.com/tesseract-ocr/tesseract")
+            QMessageBox.warning(
+                self, "OCR Not Available",
+                "OCR needs two extra packages:\n\n"
+                "    pip install pytesseract pillow\n\n"
+                "and the Tesseract OCR engine itself:\n"
+                "https://github.com/tesseract-ocr/tesseract",
+            )
             return
-        
+
         path, _ = QFileDialog.getSaveFileName(self, "Save OCR PDF", "", "PDF Files (*.pdf)")
         if not path:
             return
-        
+
         try:
-            self.status_label.setText("Running OCR... This may take a while.")
+            self.status_label.setText("Running OCR... this may take a while")
             QApplication.processEvents()
-            
-            for i in range(len(self.doc)):
-                page = self.doc[i]
-                # Render page as image at high DPI
-                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                
-                # Run OCR
-                ocr_text = pytesseract.image_to_string(img)
-                
-                # Add text layer to page
-                if ocr_text.strip():
-                    page.insert_text((50, 50), ocr_text, fontsize=8, color=(0, 0, 0), render_mode=3)
-            
-            self.doc.save(path)
+
+            out_doc = clone_document(self.doc)
+            for page in out_doc:
+                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+                image = Image.frombytes(
+                    "RGB", (pix.width, pix.height), pix.samples
+                )
+                text = pytesseract.image_to_string(image)
+                if text.strip():
+                    rect = fitz.Rect(
+                        page.rect.x0 + 36,
+                        page.rect.y0 + 36,
+                        page.rect.x1 - 36,
+                        page.rect.y1 - 36,
+                    )
+                    # render_mode=3 draws the text invisibly (text layer only)
+                    page.insert_textbox(
+                        rect, text, fontsize=8, fontname="helv", render_mode=3
+                    )
+            out_doc.save(path, garbage=3, deflate=True)
+            out_doc.close()
             self.status_label.setText(f"OCR complete: {Path(path).name}")
-            QMessageBox.information(self, "Success", "OCR text layer added to PDF.")
+            QMessageBox.information(self, "Success", f"Saved {Path(path).name}")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"OCR failed:\n{e}")
-    
     def pdf_to_word(self):
         """Convert PDF to Word document."""
         if not self.doc:
@@ -3731,7 +4530,14 @@ class PDFViewer(QMainWindow):
             QMessageBox.warning(self, "Not Available", 
                 "pdf2docx not installed. Run: pip install pdf2docx")
             return
-        
+
+        if not self.file_path:
+            QMessageBox.warning(
+                self, "Save Required",
+                "Save the document to disk before converting it.",
+            )
+            return
+
         path, _ = QFileDialog.getSaveFileName(self, "Save as Word", "", "Word Documents (*.docx)")
         if not path:
             return
@@ -3761,7 +4567,14 @@ class PDFViewer(QMainWindow):
                 "tabula-py not installed. Run: pip install tabula-py\n"
                 "Also requires Java runtime.")
             return
-        
+
+        if not self.file_path:
+            QMessageBox.warning(
+                self, "Save Required",
+                "Save the document to disk before converting it.",
+            )
+            return
+
         path, _ = QFileDialog.getSaveFileName(self, "Save as Excel", "", "Excel Files (*.xlsx)")
         if not path:
             return
@@ -3799,10 +4612,11 @@ class PDFViewer(QMainWindow):
             for img_path in paths:
                 img_doc = fitz.open(img_path)
                 pdf_bytes = img_doc.convert_to_pdf()
+                img_doc.close()
                 img_pdf = fitz.open("pdf", pdf_bytes)
                 doc.insert_pdf(img_pdf)
-                img_doc.close()
-            
+                img_pdf.close()
+
             doc.save(path)
             doc.close()
             
@@ -3810,98 +4624,29 @@ class PDFViewer(QMainWindow):
             QMessageBox.information(self, "Success", f"Created PDF with {len(paths)} pages.")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to create PDF:\n{e}")
-    
-    def rotate_left(self):
-        if not self.doc:
-            return
-        page = self.doc[self.current_page]
-        page.set_rotation((page.rotation - 90) % 360)
-        self.render_pages()
-        self.status_label.setText("Page rotated left")
-    
-    def rotate_right(self):
-        if not self.doc:
-            return
-        page = self.doc[self.current_page]
-        page.set_rotation((page.rotation + 90) % 360)
-        self.render_pages()
-        self.status_label.setText("Page rotated right")
-    
-    def delete_page(self):
-        if not self.doc or len(self.doc) <= 1:
-            return
-        reply = QMessageBox.question(self, "Delete Page", 
-            f"Delete page {self.current_page + 1}?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if reply == QMessageBox.StandardButton.Yes:
-            self.doc.delete_page(self.current_page)
-            self.load_document(self.file_path)
-            self.status_label.setText("Page deleted")
-    
-    def insert_page(self):
-        if not self.doc:
-            return
-        self.doc.new_page(self.current_page)
-        self.load_document(self.file_path)
-        self.status_label.setText("Blank page inserted")
-    
-    def crop_pages(self):
-        QMessageBox.information(self, "Crop Pages", 
-            "Crop tool: Select area on page with selection tool, then use Crop Pages.")
-    
-    def add_text_field(self):
-        self.status_label.setText("Add text field - Click on page to place field")
-        # Would need form field creation UI
-    
-    def add_checkbox(self):
-        self.status_label.setText("Add checkbox - Click on page to place checkbox")
-    
-    def add_radio_button(self):
-        self.status_label.setText("Add radio button - Click on page to place radio button")
-    
-    def add_dropdown(self):
-        self.status_label.setText("Add dropdown - Click on page to place dropdown")
-    
-    def add_signature_field(self):
-        self.status_label.setText("Add signature field - Click on page to place signature field")
-    
-    def create_signature(self):
-        """Draw or import signature."""
-        QMessageBox.information(self, "Create Signature", 
-            "Signature creation: Draw with mouse or import image.\n"
-            "This would open a signature pad dialog.")
-    
-    def sign_document(self):
-        self.status_label.setText("Sign document - Select certificate file")
-        # Would need PKCS#12 certificate handling
-    
-    def prepare_form(self):
-        if not self.doc:
-            return
-        self.status_label.setText("Preparing form - Auto-detecting fields...")
-        # Would auto-detect form fields using text patterns
-    
-    def redact_tool(self):
-        self.status_label.setText("Redact tool - Select text to redact")
-        self.sidebar_tabs.setCurrentIndex(2)  # Comments tab
-    
-    def crop_pages(self):
-        self.status_label.setText("Crop pages - Select area to crop")
 
 
-def main():
-    import traceback
+def main() -> int:
+    """Application entry point."""
+    app = QApplication(sys.argv)
+    app.setApplicationName(APP_NAME)
+    app.setApplicationVersion(APP_VERSION)
+    app.setOrganizationName("PDFEditor")
+
     try:
-        app = QApplication(sys.argv)
-        app.setApplicationName("PDF Editor")
-        
         viewer = PDFViewer()
         viewer.show()
-        
-        sys.exit(app.exec())
-    except Exception as e:
+        return app.exec()
+    except Exception as exc:  # pragma: no cover - last resort handler
+        import traceback
+
         traceback.print_exc()
-        input("Press Enter to exit...")
+        QMessageBox.critical(
+            None, f"{APP_NAME} - Startup Error",
+            f"The application could not start:\n\n{exc}",
+        )
+        return 1
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
