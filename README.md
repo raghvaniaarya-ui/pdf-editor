@@ -2,8 +2,7 @@
 
 A full-featured desktop PDF viewer and editor built with Python, PyQt6 and PyMuPDF.
 
-![Python](https://img.shields.io/badge/python-3.10%2B-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
+Requires Python 3.10 or newer.
 
 ## Features
 
@@ -149,7 +148,3 @@ the file you are editing is never modified behind your back.
   image can be inserted with *Insert Image*).
 - PDF → Word / Excel depend on optional third-party tools.
 - Link annotations cannot be created in the editor yet.
-
-## License
-
-MIT

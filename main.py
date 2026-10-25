@@ -1355,8 +1355,11 @@ class DocumentToolbar(QWidget):
         self.page_total_label.setText(f"/ {total}")
     
     def update_zoom(self, zoom):
+        text = f"{int(zoom * 100)}%"
         self.zoom_combo.blockSignals(True)
-        self.zoom_combo.setCurrentText(f"{int(zoom * 100)}%")
+        if self.zoom_combo.findText(text) == -1:
+            self.zoom_combo.addItem(text)
+        self.zoom_combo.setCurrentText(text)
         self.zoom_combo.blockSignals(False)
 
 
@@ -3947,12 +3950,22 @@ class PDFViewer(QMainWindow):
         self.pdf_to_excel()
     
     def optimize_pdf(self):
+        """Save a cleaned-up copy (garbage collection + deflate)."""
         if not self.doc:
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Optimize PDF", "", "PDF Files (*.pdf)")
-        if path:
-            self.doc.save(path, garbage=4, deflate=True, clean=True)
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Optimize PDF", "", "PDF Files (*.pdf)"
+        )
+        if not path:
+            return
+        try:
+            out_doc = clone_document(self.doc)
+            out_doc.save(path, garbage=4, deflate=True, clean=True)
+            out_doc.close()
             self.status_label.setText(f"PDF optimized: {Path(path).name}")
+            QMessageBox.information(self, "Success", f"Saved {Path(path).name}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to optimise the PDF:\n{e}")
     
     def fill_form(self):
         if not self.doc:
@@ -4316,26 +4329,33 @@ class PDFViewer(QMainWindow):
         
         try:
             count = 0
+            skipped = 0
             for i in range(len(self.doc)):
                 page = self.doc[i]
                 images = page.get_images(full=True)
-                
+
                 for img_index, img in enumerate(images):
                     xref = img[0]
-                    pix = fitz.Pixmap(self.doc, xref)
-                    
-                    if pix.n < 5:  # GRAY or RGB
-                        output_path = Path(output_dir) / f"page_{i+1}_img_{img_index+1}.png"
+                    try:
+                        pix = fitz.Pixmap(self.doc, xref)
+                        if pix.n >= 5:  # CMYK - convert to RGB
+                            pix = fitz.Pixmap(fitz.csRGB, pix)
+                        elif pix.n == 1:  # alpha mask, nothing useful to export
+                            skipped += 1
+                            continue
+                        output_path = (
+                            Path(output_dir) / f"page_{i+1}_img_{img_index+1}.png"
+                        )
                         pix.save(str(output_path))
-                    else:  # CMYK - convert to RGB
-                        pix_rgb = fitz.Pixmap(fitz.csRGB, pix)
-                        output_path = Path(output_dir) / f"page_{i+1}_img_{img_index+1}.png"
-                        pix_rgb.save(str(output_path))
-                    
-                    count += 1
+                        count += 1
+                    except Exception:
+                        skipped += 1
             
             self.status_label.setText(f"Extracted {count} images to {output_dir}")
-            QMessageBox.information(self, "Done", f"Extracted {count} images.")
+            detail = f"Extracted {count} images."
+            if skipped:
+                detail += f"\n{skipped} mask/unsupported image(s) were skipped."
+            QMessageBox.information(self, "Done", detail)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to extract images:\n{e}")
     
