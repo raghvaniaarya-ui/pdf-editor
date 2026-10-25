@@ -44,6 +44,8 @@ check_untyped_defs = false
 exclude = ["build/", "dist/"]
 
 [tool.pytest.ini_options]
+# Make `import main` work when pytest is started as a console script.
+pythonpath = ["."]
 testpaths = ["tests"]
 addopts = "-ra"
 filterwarnings = ["ignore::DeprecationWarning"]
