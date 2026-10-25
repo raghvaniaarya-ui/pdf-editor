@@ -1,0 +1,11 @@
+# Development / CI dependencies (installs the runtime requirements too)
+-r requirements.txt
+
+pytest>=8.0
+pytest-qt>=4.4
+pytest-cov>=5.0
+ruff==0.17.2
+mypy>=1.10
+
+# Packaging
+pyinstaller>=6.6
